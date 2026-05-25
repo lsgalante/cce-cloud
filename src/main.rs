@@ -773,6 +773,12 @@ impl State {
     }
 }
 
+impl Drop for State {
+    fn drop(&mut self) {
+        self.wl_surface.destroy();
+    }
+}
+
 #[allow(dead_code)]
 struct AppState {
     registry_state: RegistryState,
@@ -1254,6 +1260,10 @@ fn main() {
         }
     }
 
+    if let Some(state) = &mut app.state {
+        state.window.set_keyboard_interactivity(KeyboardInteractivity::None);
+        state.wl_surface.commit();
+    }
     drop(app);
     let _ = conn_clone.roundtrip();
 }
