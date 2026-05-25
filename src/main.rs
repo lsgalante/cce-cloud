@@ -1,13 +1,35 @@
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
-use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{Window, WindowAttributes};
-use winit::keyboard::{Key, NamedKey};
-use winit::dpi::{PhysicalSize, LogicalSize, LogicalPosition};
+use std::path::Path;
 
 use clear_ui::widget::{Widget, TextLabel};
+
+use smithay_client_toolkit::{
+    compositor::{CompositorHandler, CompositorState},
+    delegate_compositor, delegate_keyboard, delegate_pointer, delegate_registry,
+    delegate_seat, delegate_shm, delegate_layer, delegate_output,
+    registry::{ProvidesRegistryState, RegistryState},
+    output::{OutputHandler, OutputState},
+    seat::{
+        keyboard::KeyboardHandler,
+        pointer::PointerHandler,
+        Capability, SeatHandler, SeatState,
+    },
+    shell::{
+        wlr_layer::{
+            Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler,
+            LayerSurface, LayerSurfaceConfigure,
+        },
+        WaylandSurface,
+    },
+    shm::{Shm, ShmHandler},
+};
+use wayland_client::{
+    globals::registry_queue_init,
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    Connection, QueueHandle, Proxy,
+};
+use calloop_wayland_source::WaylandSource;
 
 use glyphon::{
     Attrs, Buffer, Cache, FontSystem, Metrics, Resolution, SwashCache, TextArea, TextAtlas,
@@ -324,8 +346,8 @@ impl Widget for FuzzelWidget {
         labels
     }
 
-    fn mouse_input(&mut self, button: winit::event::MouseButton, state: ElementState, px: f32, py: f32) -> bool {
-        if button == winit::event::MouseButton::Left && state == ElementState::Pressed {
+    fn mouse_input(&mut self, button: clear_ui::widget::MouseButton, state: clear_ui::widget::ElementState, px: f32, py: f32) -> bool {
+        if button == clear_ui::widget::MouseButton::Left && state == clear_ui::widget::ElementState::Pressed {
             let pad = 15.0;
             let search_h = 35.0;
             let list_y = self.y + pad + search_h + 10.0;
@@ -353,7 +375,8 @@ struct StdinState {
 }
 
 struct State {
-    window: Arc<Window>,
+    window: LayerSurface,
+    wl_surface: wl_surface::WlSurface,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -381,13 +404,38 @@ struct State {
 }
 
 impl State {
-    async fn new(window: Arc<Window>, prompt: String) -> Self {
-        let scale = window.scale_factor();
-        let physical_size = window.inner_size();
-        let pw = physical_size.width.max(1);
-        let ph = physical_size.height.max(1);
-        let lw = pw as f32 / scale as f32;
-        let lh = ph as f32 / scale as f32;
+    async fn new(
+        conn: &Connection,
+        qh: &QueueHandle<AppState>,
+        compositor_state: &CompositorState,
+        layer_shell_state: &LayerShell,
+        prompt: String,
+        stdin_sender: calloop::channel::Sender<()>,
+    ) -> Self {
+        let scale = 2.0f64;
+        let (width, height) = (600, 400);
+        let pw = (width as f64 * scale) as u32;
+        let ph = (height as f64 * scale) as u32;
+        let lw = width as f32;
+        let lh = height as f32;
+
+        let wl_surface = compositor_state.create_surface(qh);
+        let window = layer_shell_state.create_layer_surface(
+            qh,
+            wl_surface.clone(),
+            Layer::Overlay,
+            Some("clear-cloud".to_string()),
+            None,
+        );
+        window.set_size(width, height);
+        window.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        window.set_anchor(Anchor::empty());
+        wl_surface.commit();
+
+        let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
+            display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
+            surface_ptr: wl_surface.id().as_ptr() as *mut std::ffi::c_void,
+        }));
 
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -395,7 +443,7 @@ impl State {
         });
 
         let surface = instance
-            .create_surface(window.clone())
+            .create_surface(wayland_handle)
             .expect("Failed to create surface");
 
         let adapter = instance
@@ -511,7 +559,6 @@ impl State {
 
         if !io::stdin().is_terminal() {
             let stdin_state_clone = stdin_state.clone();
-            let window_clone = window.clone();
             std::thread::spawn(move || {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
@@ -520,7 +567,7 @@ impl State {
                             lock_state.items.push(line);
                             lock_state.new_data = true;
                         }
-                        window_clone.request_redraw();
+                        let _ = stdin_sender.send(());
                     }
                 }
             });
@@ -534,6 +581,7 @@ impl State {
 
         let mut state = Self {
             window,
+            wl_surface,
             surface,
             device,
             queue,
@@ -657,33 +705,33 @@ impl State {
             .unwrap();
     }
 
-    fn resize(&mut self, new_size: PhysicalSize<u32>) {
-        if new_size.width > 0 && new_size.height > 0 {
-            self.physical_width = new_size.width;
-            self.physical_height = new_size.height;
-            self.width = new_size.width as f32 / self.scale as f32;
-            self.height = new_size.height as f32 / self.scale as f32;
-            self.config.width = new_size.width;
-            self.config.height = new_size.height;
+    fn resize(&mut self, width: u32, height: u32) {
+        if width > 0 && height > 0 {
+            self.physical_width = width;
+            self.physical_height = height;
+            self.width = width as f32 / self.scale as f32;
+            self.height = height as f32 / self.scale as f32;
+            self.config.width = width;
+            self.config.height = height;
             self.surface.configure(&self.device, &self.config);
             self.apply_layout();
             self.upload_vertices();
         }
     }
 
-    fn render(&mut self) {
+    fn render(&mut self) -> bool {
         self.prepare_text();
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
-            Err(wgpu::SurfaceError::Timeout) => return,
+            Err(wgpu::SurfaceError::Timeout) => return false,
             Err(e) => {
                 eprintln!("Surface error: {e:?}");
-                return;
+                return false;
             }
         };
 
@@ -721,165 +769,397 @@ impl State {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        self.window.pre_present_notify();
         output.present();
+        false
     }
 }
 
-struct App {
+struct AppState {
+    registry_state: RegistryState,
+    compositor_state: CompositorState,
+    layer_shell_state: LayerShell,
+    shm_state: Shm,
+    seat_state: SeatState,
+    output_state: OutputState,
+
+    seats: Vec<wl_seat::WlSeat>,
+    pointer: Option<wl_pointer::WlPointer>,
+    keyboard: Option<wl_keyboard::WlKeyboard>,
+
+    window: LayerSurface,
+    surface: wl_surface::WlSurface,
+
     state: Option<State>,
-    prompt: String,
+    exit: bool,
+    redraw: bool,
 }
 
-impl App {
-    fn new(prompt: String) -> Self {
-        Self { state: None, prompt }
+impl CompositorHandler for AppState {
+    fn scale_factor_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        scale_factor: i32,
+    ) {
+        if let Some(state) = &mut self.state {
+            state.scale = scale_factor as f64;
+            let pw = (state.width as f64 * state.scale) as u32;
+            let ph = (state.height as f64 * state.scale) as u32;
+            state.resize(pw, ph);
+            self.redraw = true;
+        }
+    }
+
+    fn transform_changed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _new_transform: wl_output::Transform,
+    ) {}
+
+    fn frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _time: u32,
+    ) {}
+
+    fn surface_enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {}
+
+    fn surface_leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _surface: &wl_surface::WlSurface,
+        _output: &wl_output::WlOutput,
+    ) {}
+}
+
+impl OutputHandler for AppState {
+    fn output_state(&mut self) -> &mut OutputState {
+        &mut self.output_state
+    }
+
+    fn new_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {}
+
+    fn update_output(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {}
+
+    fn output_destroyed(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _output: wl_output::WlOutput,
+    ) {}
+}
+
+impl SeatHandler for AppState {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.seats.push(seat);
+    }
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer && self.pointer.is_none() {
+            let pointer = self.seat_state.get_pointer(qh, &seat).unwrap();
+            self.pointer = Some(pointer);
+        }
+        if capability == Capability::Keyboard && self.keyboard.is_none() {
+            let keyboard = self
+                .seat_state
+                .get_keyboard(qh, &seat, None)
+                .unwrap();
+            self.keyboard = Some(keyboard);
+        }
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            self.pointer = None;
+        }
+        if capability == Capability::Keyboard {
+            self.keyboard = None;
+        }
+    }
+
+    fn remove_seat(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        self.seats.retain(|s| s != &seat);
     }
 }
 
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+impl ShmHandler for AppState {
+    fn shm_state(&mut self) -> &mut Shm {
+        &mut self.shm_state
+    }
+}
 
-        let monitor = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next());
-        let (width, height) = (600, 400);
-        let mut window_attributes = WindowAttributes::default()
-            .with_title("clear-cloud")
-            .with_decorations(false)
-            .with_inner_size(LogicalSize::new(width, height))
-            .with_transparent(true);
+impl PointerHandler for AppState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _pointer: &wl_pointer::WlPointer,
+        events: &[smithay_client_toolkit::seat::pointer::PointerEvent],
+    ) {
+        use smithay_client_toolkit::seat::pointer::PointerEventKind;
+        for event in events {
+            let (x, y) = event.position;
+            if let Some(st) = &mut self.state {
+                let scale = st.scale;
+                let cx = (x * scale) as f32;
+                let cy = (y * scale) as f32;
+                match &event.kind {
+                    PointerEventKind::Motion { .. } => {
+                        st.cursor_x = cx;
+                        st.cursor_y = cy;
+                    }
+                    PointerEventKind::Press { button, .. } => {
+                        if *button == 272 {
+                            st.cursor_x = cx;
+                            st.cursor_y = cy;
+                            let prev_selected = st.fuzzel.selected;
+                            let changed = st.fuzzel.mouse_input(
+                                clear_ui::widget::MouseButton::Left,
+                                clear_ui::widget::ElementState::Pressed,
+                                st.cursor_x,
+                                st.cursor_y,
+                            );
+                            if changed {
+                                if st.fuzzel.selected == prev_selected {
+                                    if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                                        println!("{}", item);
+                                        std::process::exit(0);
+                                    }
+                                }
+                                st.upload_vertices();
+                                self.redraw = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
 
-        if let Some(monitor) = monitor {
-            let monitor_size = monitor.size();
-            let scale_factor = monitor.scale_factor();
-            let monitor_w = monitor_size.width as f64 / scale_factor;
-            let monitor_h = monitor_size.height as f64 / scale_factor;
-            let x = (monitor_w - width as f64) / 2.0;
-            let y = (monitor_h - height as f64) / 2.0;
-            window_attributes = window_attributes.with_position(LogicalPosition::new(x, y));
+impl KeyboardHandler for AppState {
+    fn enter(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+        _raw_modifiers: &[u32],
+        _keysyms: &[xkeysym::Keysym],
+    ) {}
+
+    fn leave(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _surface: &wl_surface::WlSurface,
+        _serial: u32,
+    ) {}
+
+    fn press_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: smithay_client_toolkit::seat::keyboard::KeyEvent,
+    ) {
+        self.handle_key(event, clear_ui::widget::ElementState::Pressed);
+    }
+
+    fn release_key(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        event: smithay_client_toolkit::seat::keyboard::KeyEvent,
+    ) {
+        self.handle_key(event, clear_ui::widget::ElementState::Released);
+    }
+
+    fn update_modifiers(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _keyboard: &wl_keyboard::WlKeyboard,
+        _serial: u32,
+        _modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
+        _layout: u32,
+    ) {}
+}
+
+impl LayerShellHandler for AppState {
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
+        self.exit = true;
+    }
+
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _layer: &LayerSurface,
+        configure: LayerSurfaceConfigure,
+        _serial: u32,
+    ) {
+        let (width, height) = configure.new_size;
+        if let Some(state) = &mut self.state {
+            state.resize(width, height);
+        }
+        self.redraw = true;
+    }
+}
+
+impl ProvidesRegistryState for AppState {
+    fn registry(&mut self) -> &mut RegistryState {
+        &mut self.registry_state
+    }
+    
+    fn runtime_add_global(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _name: u32,
+        _interface: &str,
+        _version: u32,
+    ) {}
+    
+    fn runtime_remove_global(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _name: u32,
+        _interface: &str,
+    ) {}
+}
+
+delegate_compositor!(AppState);
+delegate_layer!(AppState);
+delegate_shm!(AppState);
+delegate_seat!(AppState);
+delegate_pointer!(AppState);
+delegate_keyboard!(AppState);
+delegate_registry!(AppState);
+delegate_output!(AppState);
+
+impl AppState {
+    fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: clear_ui::widget::ElementState) {
+        use clear_ui::widget::{Key, NamedKey};
+        if state != clear_ui::widget::ElementState::Pressed {
+            return;
         }
 
-        let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
-        let state = pollster::block_on(State::new(window, self.prompt.clone()));
-        self.state = Some(state);
-        self.state.as_ref().unwrap().window.request_redraw();
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: winit::window::WindowId,
-        event: WindowEvent,
-    ) {
-        if self.state.is_none() { return; }
-        let state = self.state.as_mut().unwrap();
-
-        let needs_redraw = match event {
-            WindowEvent::CloseRequested => {
-                event_loop.exit();
-                true
-            }
-            WindowEvent::Resized(size) => {
-                state.resize(size);
-                true
-            }
-            WindowEvent::RedrawRequested => {
-                if state.check_stdin_updates() {
-                    state.apply_layout();
-                    state.upload_vertices();
-                }
-                state.render();
-                false
-            }
-            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
-                let new_physical = winit::dpi::PhysicalSize::new(
-                    (state.width as f64 * scale_factor) as u32,
-                    (state.height as f64 * scale_factor) as u32,
-                );
-                let _ = inner_size_writer.request_inner_size(new_physical);
-                state.scale = scale_factor;
-                state.resize(new_physical);
-                true
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                state.cursor_x = position.x as f32 / state.scale as f32;
-                state.cursor_y = position.y as f32 / state.scale as f32;
-                false
-            }
-            WindowEvent::MouseInput { state: btn_state, button, .. } => {
-                if button == winit::event::MouseButton::Left && btn_state == ElementState::Pressed {
-                    let prev_selected = state.fuzzel.selected;
-                    let changed = state.fuzzel.mouse_input(button, btn_state, state.cursor_x, state.cursor_y);
-                    if changed {
-                        if state.fuzzel.selected == prev_selected {
-                            if let Some(item) = state.fuzzel.filtered_items.get(state.fuzzel.selected) {
-                                println!("{}", item);
-                                std::process::exit(0);
-                            }
-                        }
-                        state.upload_vertices();
-                        true
-                    } else {
-                        false
-                    }
+        let logical_key = match event.keysym {
+            xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
+            xkeysym::Keysym::Return => Key::Named(NamedKey::Enter),
+            xkeysym::Keysym::BackSpace => Key::Named(NamedKey::Backspace),
+            xkeysym::Keysym::Down => Key::Named(NamedKey::ArrowDown),
+            xkeysym::Keysym::Up => Key::Named(NamedKey::ArrowUp),
+            xkeysym::Keysym::Left => Key::Named(NamedKey::ArrowLeft),
+            xkeysym::Keysym::Right => Key::Named(NamedKey::ArrowRight),
+            xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
+            xkeysym::Keysym::Delete => Key::Named(NamedKey::Delete),
+            xkeysym::Keysym::space => Key::Named(NamedKey::Space),
+            _ => {
+                if let Some(ref text) = event.utf8 {
+                    Key::Character(text.clone())
                 } else {
-                    false
+                    return;
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } => {
-                if event.state == ElementState::Pressed {
-                    let mut handled = true;
-                    match &event.logical_key {
-                        Key::Named(NamedKey::Escape) => {
-                            std::process::exit(0);
-                        }
-                        Key::Named(NamedKey::Enter) => {
-                            if let Some(item) = state.fuzzel.filtered_items.get(state.fuzzel.selected) {
-                                println!("{}", item);
-                                std::process::exit(0);
-                            }
-                        }
-                        Key::Named(NamedKey::ArrowDown) => {
-                            if !state.fuzzel.filtered_items.is_empty() {
-                                state.fuzzel.selected = (state.fuzzel.selected + 1).min(state.fuzzel.filtered_items.len() - 1);
-                                state.fuzzel.update_scroll();
-                                state.upload_vertices();
-                            }
-                        }
-                        Key::Named(NamedKey::ArrowUp) => {
-                            if state.fuzzel.selected > 0 {
-                                state.fuzzel.selected -= 1;
-                                state.fuzzel.update_scroll();
-                                state.upload_vertices();
-                            }
-                        }
-                        Key::Named(NamedKey::Backspace) => {
-                            state.fuzzel.query.pop();
-                            state.fuzzel.filter();
-                            state.upload_vertices();
-                        }
-                        _ => {
-                            if let Some(text) = &event.text {
-                                for ch in text.chars().filter(|c| !c.is_control()) {
-                                    state.fuzzel.query.push(ch);
-                                }
-                                state.fuzzel.filter();
-                                state.upload_vertices();
-                            } else {
-                                handled = false;
-                            }
-                        }
-                    }
-                    handled
-                } else {
-                    false
-                }
-            }
-            _ => false,
         };
 
-        if needs_redraw {
-            state.window.request_redraw();
+        if let Some(st) = &mut self.state {
+            let mut handled = true;
+            match &logical_key {
+                Key::Named(NamedKey::Escape) => {
+                    std::process::exit(0);
+                }
+                Key::Named(NamedKey::Enter) => {
+                    if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                        println!("{}", item);
+                        std::process::exit(0);
+                    }
+                }
+                Key::Named(NamedKey::ArrowDown) => {
+                    if !st.fuzzel.filtered_items.is_empty() {
+                        st.fuzzel.selected = (st.fuzzel.selected + 1).min(st.fuzzel.filtered_items.len() - 1);
+                        st.fuzzel.update_scroll();
+                        st.upload_vertices();
+                        self.redraw = true;
+                    }
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    if st.fuzzel.selected > 0 {
+                        st.fuzzel.selected -= 1;
+                        st.fuzzel.update_scroll();
+                        st.upload_vertices();
+                        self.redraw = true;
+                    }
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    st.fuzzel.query.pop();
+                    st.fuzzel.filter();
+                    st.upload_vertices();
+                    self.redraw = true;
+                }
+                _ => {
+                    if let Some(text) = &event.utf8 {
+                        for ch in text.chars().filter(|c| !c.is_control()) {
+                            st.fuzzel.query.push(ch);
+                        }
+                        st.fuzzel.filter();
+                        st.upload_vertices();
+                        self.redraw = true;
+                    } else {
+                        handled = false;
+                    }
+                }
+            }
+            if handled {
+                self.redraw = true;
+            }
         }
     }
 }
@@ -895,9 +1175,80 @@ fn main() {
         }
     }
 
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Wait);
+    let conn = Connection::connect_to_env().unwrap();
+    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let qh = event_queue.handle();
 
-    let mut app = App::new(prompt);
-    event_loop.run_app(&mut app).unwrap();
+    let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
+    let layer_shell_state = LayerShell::bind(&globals, &qh).unwrap();
+    let shm_state = Shm::bind(&globals, &qh).unwrap();
+    let seat_state = SeatState::new(&globals, &qh);
+    let output_state = OutputState::new(&globals, &qh);
+
+    let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
+
+    let state = pollster::block_on(State::new(
+        &conn,
+        &qh,
+        &compositor_state,
+        &layer_shell_state,
+        prompt,
+        stdin_sender,
+    ));
+
+    let mut app = AppState {
+        registry_state: RegistryState::new(&globals),
+        compositor_state,
+        layer_shell_state,
+        shm_state,
+        seat_state,
+        output_state,
+        seats: Vec::new(),
+        pointer: None,
+        keyboard: None,
+        window: state.window.clone(),
+        surface: state.wl_surface.clone(),
+        state: Some(state),
+        exit: false,
+        redraw: true,
+    };
+
+    let mut event_loop = calloop::EventLoop::try_new().unwrap();
+    let loop_handle = event_loop.handle();
+
+    WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
+
+    loop_handle.insert_source(stdin_channel, |event, _metadata, app_state: &mut AppState| {
+        if let calloop::channel::Event::Msg(()) = event {
+            if let Some(st) = &mut app_state.state {
+                if st.check_stdin_updates() {
+                    st.apply_layout();
+                    st.upload_vertices();
+                    app_state.redraw = true;
+                }
+            }
+        }
+    }).unwrap();
+
+    loop {
+        let timeout = if app.redraw {
+            std::time::Duration::from_millis(0)
+        } else {
+            std::time::Duration::from_millis(16)
+        };
+        event_loop.dispatch(timeout, &mut app).unwrap();
+
+        if app.exit {
+            break;
+        }
+
+        if app.redraw {
+            app.redraw = false;
+            if let Some(state) = &mut app.state {
+                if state.render() {
+                    app.redraw = true;
+                }
+            }
+        }
+    }
 }
