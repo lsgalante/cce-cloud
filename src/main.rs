@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
-use std::path::Path;
 
 use clear_ui::widget::{Widget, TextLabel};
 
@@ -20,13 +19,12 @@ use smithay_client_toolkit::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler,
             LayerSurface, LayerSurfaceConfigure,
         },
-        WaylandSurface,
     },
     shm::{Shm, ShmHandler},
 };
 use wayland_client::{
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_surface},
     Connection, QueueHandle, Proxy,
 };
 use calloop_wayland_source::WaylandSource;
@@ -774,6 +772,7 @@ impl State {
     }
 }
 
+#[allow(dead_code)]
 struct AppState {
     registry_state: RegistryState,
     compositor_state: CompositorState,
@@ -1176,7 +1175,7 @@ fn main() {
     }
 
     let conn = Connection::connect_to_env().unwrap();
-    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
 
     let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
