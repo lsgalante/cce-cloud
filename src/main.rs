@@ -167,6 +167,139 @@ fn scan_path() -> Vec<String> {
     executables.into_iter().collect()
 }
 
+fn clean_exec_command(exec: &str) -> String {
+    let mut words = Vec::new();
+    for word in exec.split_whitespace() {
+        match word {
+            "%f" | "%F" | "%u" | "%U" | "%d" | "%D" | "%n" | "%N" | "%i" | "%c" | "%k" | "%v" => {
+                // Skip these field codes
+            }
+            _ => {
+                let cleaned = word
+                    .replace("%f", "")
+                    .replace("%F", "")
+                    .replace("%u", "")
+                    .replace("%U", "")
+                    .replace("%d", "")
+                    .replace("%D", "")
+                    .replace("%n", "")
+                    .replace("%N", "")
+                    .replace("%i", "")
+                    .replace("%c", "")
+                    .replace("%k", "")
+                    .replace("%v", "")
+                    .replace("%%", "%");
+                if !cleaned.is_empty() {
+                    words.push(cleaned);
+                }
+            }
+        }
+    }
+    words.join(" ")
+}
+
+fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
+    let file = std::fs::File::open(path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    
+    let mut in_desktop_entry = false;
+    let mut name = None;
+    let mut exec = None;
+    let mut is_application = true;
+    let mut no_display = false;
+
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if trimmed == "[Desktop Entry]" {
+                in_desktop_entry = true;
+            } else {
+                in_desktop_entry = false;
+            }
+            continue;
+        }
+        if in_desktop_entry {
+            if let Some(pos) = trimmed.find('=') {
+                let key = trimmed[..pos].trim();
+                let value = trimmed[pos + 1..].trim();
+                match key {
+                    "Name" => {
+                        if name.is_none() {
+                            name = Some(value.to_string());
+                        }
+                    }
+                    "Exec" => {
+                        if exec.is_none() {
+                            exec = Some(clean_exec_command(value));
+                        }
+                    }
+                    "Type" => {
+                        if value != "Application" {
+                            is_application = false;
+                        }
+                    }
+                    "NoDisplay" => {
+                        if value == "true" {
+                            no_display = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if is_application && !no_display {
+        if let (Some(n), Some(e)) = (name, exec) {
+            return Some(AppInfo { name: n, exec: e });
+        }
+    }
+    None
+}
+
+fn scan_apps() -> Vec<AppInfo> {
+    let mut apps = Vec::new();
+    let mut dirs = vec![
+        std::path::PathBuf::from("/usr/share/applications"),
+        std::path::PathBuf::from("/usr/local/share/applications"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(std::path::PathBuf::from(home).join(".local/share/applications"));
+    }
+
+    for dir in dirs {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().map_or(false, |ext| ext == "desktop") {
+                        if let Some(app) = parse_desktop_file(&path) {
+                            apps.push(app);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    apps.sort_by(|a, b| a.name.cmp(&b.name));
+    apps.dedup_by(|a, b| a.name == b.name);
+    apps
+}
+
+fn spawn_command(cmd: &str) {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .spawn()
+        .ok();
+}
+
+
 pub struct FuzzelWidget {
     x: f32,
     y: f32,
@@ -367,6 +500,19 @@ impl Widget for FuzzelWidget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LauncherMode {
+    Dmenu,
+    Path,
+    Apps,
+}
+
+#[derive(Debug, Clone)]
+struct AppInfo {
+    name: String,
+    exec: String,
+}
+
 struct StdinState {
     items: Vec<String>,
     new_data: bool,
@@ -399,6 +545,8 @@ struct State {
     scale: f64,
 
     stdin_state: Arc<Mutex<StdinState>>,
+    mode: LauncherMode,
+    apps: Vec<AppInfo>,
 }
 
 impl State {
@@ -409,6 +557,7 @@ impl State {
         layer_shell_state: &LayerShell,
         prompt: String,
         stdin_sender: calloop::channel::Sender<()>,
+        mode: LauncherMode,
     ) -> Self {
         let scale = 2.0f64;
         let (width, height) = (600, 400);
@@ -556,7 +705,8 @@ impl State {
             new_data: false,
         }));
 
-        if !io::stdin().is_terminal() {
+        let mut apps = Vec::new();
+        if mode == LauncherMode::Dmenu {
             let stdin_state_clone = stdin_state.clone();
             std::thread::spawn(move || {
                 let stdin = io::stdin();
@@ -570,6 +720,13 @@ impl State {
                     }
                 }
             });
+        } else if mode == LauncherMode::Apps {
+            apps = scan_apps();
+            let app_names: Vec<String> = apps.iter().map(|app| app.name.clone()).collect();
+            if let Ok(mut lock_state) = stdin_state.lock() {
+                lock_state.items = app_names;
+                lock_state.new_data = true;
+            }
         } else {
             let path_items = scan_path();
             if let Ok(mut lock_state) = stdin_state.lock() {
@@ -602,6 +759,8 @@ impl State {
             physical_height: ph,
             scale,
             stdin_state,
+            mode,
+            apps,
         };
 
         state.check_stdin_updates();
@@ -968,6 +1127,17 @@ impl PointerHandler for AppState {
                                 if st.fuzzel.selected == prev_selected {
                                     if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                         println!("{}", item);
+                                        match st.mode {
+                                            LauncherMode::Apps => {
+                                                if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                                    spawn_command(&app.exec);
+                                                }
+                                            }
+                                            LauncherMode::Path => {
+                                                spawn_command(item);
+                                            }
+                                            LauncherMode::Dmenu => {}
+                                        }
                                         self.exit = true;
                                     }
                                 }
@@ -1126,6 +1296,17 @@ impl AppState {
                 Key::Named(NamedKey::Enter) => {
                     if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                         println!("{}", item);
+                        match st.mode {
+                            LauncherMode::Apps => {
+                                if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                    spawn_command(&app.exec);
+                                }
+                            }
+                            LauncherMode::Path => {
+                                spawn_command(item);
+                            }
+                            LauncherMode::Dmenu => {}
+                        }
                         self.exit = true;
                     }
                 }
@@ -1173,11 +1354,40 @@ impl AppState {
 
 fn main() {
     let mut prompt = "Search: ".to_string();
+    let mut mode = if !io::stdin().is_terminal() {
+        LauncherMode::Dmenu
+    } else {
+        LauncherMode::Path
+    };
+
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         if arg == "-p" || arg == "--prompt" {
             if let Some(p) = args.next() {
                 prompt = p;
+            }
+        } else if arg == "--mode" {
+            if let Some(m) = args.next() {
+                if io::stdin().is_terminal() {
+                    match m.as_str() {
+                        "apps" => mode = LauncherMode::Apps,
+                        "path" => mode = LauncherMode::Path,
+                        "dmenu" => mode = LauncherMode::Dmenu,
+                        _ => eprintln!("Unknown mode: {}", m),
+                    }
+                }
+            }
+        } else if arg == "--apps" {
+            if io::stdin().is_terminal() {
+                mode = LauncherMode::Apps;
+            }
+        } else if arg == "--path" {
+            if io::stdin().is_terminal() {
+                mode = LauncherMode::Path;
+            }
+        } else if arg == "--dmenu" {
+            if io::stdin().is_terminal() {
+                mode = LauncherMode::Dmenu;
             }
         }
     }
@@ -1202,6 +1412,7 @@ fn main() {
         &layer_shell_state,
         prompt,
         stdin_sender,
+        mode,
     ));
 
     let mut app = AppState {
