@@ -418,6 +418,7 @@ impl State {
         let lh = height as f32;
 
         let wl_surface = compositor_state.create_surface(qh);
+        wl_surface.set_buffer_scale(scale as i32);
         let window = layer_shell_state.create_layer_surface(
             qh,
             wl_surface.clone(),
@@ -803,6 +804,7 @@ impl CompositorHandler for AppState {
     ) {
         if let Some(state) = &mut self.state {
             state.scale = scale_factor as f64;
+            state.wl_surface.set_buffer_scale(scale_factor);
             let pw = (state.width as f64 * state.scale) as u32;
             let ph = (state.height as f64 * state.scale) as u32;
             state.resize(pw, ph);
