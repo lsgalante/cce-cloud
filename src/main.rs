@@ -1255,5 +1255,5 @@ fn main() {
     }
 
     drop(app);
-    let _ = conn_clone.flush();
+    let _ = conn_clone.roundtrip();
 }
