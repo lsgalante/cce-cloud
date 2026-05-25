@@ -962,7 +962,7 @@ impl PointerHandler for AppState {
                                 if st.fuzzel.selected == prev_selected {
                                     if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                         println!("{}", item);
-                                        std::process::exit(0);
+                                        self.exit = true;
                                     }
                                 }
                                 st.upload_vertices();
@@ -1115,12 +1115,12 @@ impl AppState {
             let mut handled = true;
             match &logical_key {
                 Key::Named(NamedKey::Escape) => {
-                    std::process::exit(0);
+                    self.exit = true;
                 }
                 Key::Named(NamedKey::Enter) => {
                     if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                         println!("{}", item);
-                        std::process::exit(0);
+                        self.exit = true;
                     }
                 }
                 Key::Named(NamedKey::ArrowDown) => {
@@ -1177,6 +1177,7 @@ fn main() {
     }
 
     let conn = Connection::connect_to_env().unwrap();
+    let conn_clone = conn.clone();
     let (globals, event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
 
@@ -1252,4 +1253,7 @@ fn main() {
             }
         }
     }
+
+    drop(app);
+    let _ = conn_clone.flush();
 }
