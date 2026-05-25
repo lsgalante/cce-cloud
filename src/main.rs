@@ -343,7 +343,7 @@ impl FuzzelWidget {
     }
 
     pub fn update_scroll(&mut self) {
-        let visible_items = 13;
+        let visible_items = 29;
         if self.selected >= self.scroll_offset + visible_items {
             self.scroll_offset = self.selected - visible_items + 1;
         } else if self.selected < self.scroll_offset {
@@ -396,7 +396,7 @@ impl Widget for FuzzelWidget {
         // Items list background highlight
         let list_y = self.y + pad + search_h + 10.0;
         let row_h = 25.0;
-        let visible_items = 13;
+        let visible_items = 29;
 
         if !self.filtered_items.is_empty() && self.selected >= self.scroll_offset {
             let relative_selected = self.selected - self.scroll_offset;
@@ -441,7 +441,7 @@ impl Widget for FuzzelWidget {
 
         let list_y = self.y + pad + search_h + 10.0;
         let row_h = 25.0;
-        let visible_items = 13;
+        let visible_items = 29;
 
         let start = self.scroll_offset;
         let end = self.filtered_items.len().min(start + visible_items);
@@ -483,7 +483,7 @@ impl Widget for FuzzelWidget {
             let search_h = 35.0;
             let list_y = self.y + pad + search_h + 10.0;
             let row_h = 25.0;
-            let visible_items = 13;
+            let visible_items = 29;
 
             if px >= self.x + pad && px <= self.x + self.w - pad {
                 if py >= list_y && py < list_y + visible_items as f32 * row_h {
@@ -560,7 +560,7 @@ impl State {
         mode: LauncherMode,
     ) -> Self {
         let scale = 2.0f64;
-        let (width, height) = (600, 400);
+        let (width, height) = (600, 800);
         let pw = (width as f64 * scale) as u32;
         let ph = (height as f64 * scale) as u32;
         let lw = width as f32;
