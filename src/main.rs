@@ -310,7 +310,7 @@ pub struct FuzzelWidget {
     all_items: Vec<String>,
     filtered_items: Vec<String>,
     selected: usize,
-    scroll_offset: usize,
+    pub scroll_box: clear_ui::widget::ScrollBox,
 }
 
 impl FuzzelWidget {
@@ -325,7 +325,7 @@ impl FuzzelWidget {
             all_items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
-            scroll_offset: 0,
+            scroll_box: clear_ui::widget::ScrollBox::new(),
         }
     }
 
@@ -340,15 +340,39 @@ impl FuzzelWidget {
             self.selected = self.filtered_items.len().saturating_sub(1);
         }
         self.update_scroll();
+        self.snap_to_selected();
     }
 
     pub fn update_scroll(&mut self) {
-        let visible_items = 29;
-        if self.selected >= self.scroll_offset + visible_items {
-            self.scroll_offset = self.selected - visible_items + 1;
-        } else if self.selected < self.scroll_offset {
-            self.scroll_offset = self.selected;
+        let item_h = 25.0;
+        let pad = 15.0;
+        let search_h = 35.0;
+        let viewport_y = self.y + pad + search_h + 10.0;
+        let viewport_h = self.h - (pad + search_h + 10.0) - pad;
+        let content_h = self.filtered_items.len() as f32 * item_h;
+        self.scroll_box.update_bounds(content_h, viewport_y, viewport_h);
+    }
+
+    pub fn snap_to_selected(&mut self) {
+        let item_h = 25.0;
+        let pad = 15.0;
+        let search_h = 35.0;
+        let viewport_h = self.h - (pad + search_h + 10.0) - pad;
+        let content_h = self.filtered_items.len() as f32 * item_h;
+
+        if self.filtered_items.is_empty() {
+            return;
         }
+
+        let virtual_selected_y = self.selected as f32 * item_h;
+        if virtual_selected_y + item_h > self.scroll_box.scroll_y + viewport_h {
+            self.scroll_box.scroll_y = virtual_selected_y + item_h - viewport_h;
+        } else if virtual_selected_y < self.scroll_box.scroll_y {
+            self.scroll_box.scroll_y = virtual_selected_y;
+        }
+
+        let max_scroll = (content_h - viewport_h).max(0.0);
+        self.scroll_box.scroll_y = self.scroll_box.scroll_y.clamp(0.0, max_scroll);
     }
 }
 
@@ -362,6 +386,13 @@ impl Widget for FuzzelWidget {
         self.y = y;
         self.w = w;
         self.h = h;
+
+        let pad = 15.0;
+        let search_h = 35.0;
+        let viewport_y = y + pad + search_h + 10.0;
+        let viewport_h = h - (pad + search_h + 10.0) - pad;
+        self.scroll_box.set_rect(x + pad, viewport_y, w - pad * 2.0, viewport_h);
+        self.update_scroll();
     }
 
     fn color(&self) -> [f32; 4] {
@@ -393,20 +424,20 @@ impl Widget for FuzzelWidget {
         quads.push((bx, by, 1.0, bh, border_color));
         quads.push((bx + bw - 1.0, by, 1.0, bh, border_color));
 
-        // Items list background highlight
-        let list_y = self.y + pad + search_h + 10.0;
-        let row_h = 25.0;
-        let visible_items = 29;
+        // ScrollBox quads
+        quads.extend(self.scroll_box.extra_quads());
 
-        if !self.filtered_items.is_empty() && self.selected >= self.scroll_offset {
-            let relative_selected = self.selected - self.scroll_offset;
-            if relative_selected < visible_items {
-                let y = list_y + relative_selected as f32 * row_h;
+        // Selected Item Highlight
+        let item_h = 25.0;
+        if !self.filtered_items.is_empty() {
+            let virtual_selected_y = self.selected as f32 * item_h;
+            if let Some(draw_y) = self.scroll_box.get_item_draw_y(virtual_selected_y, item_h) {
+                let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
                 quads.push((
-                    self.x + pad,
-                    y,
-                    self.w - pad * 2.0,
-                    row_h - 2.0,
+                    self.x + pad + 2.0,
+                    draw_y,
+                    self.w - pad * 2.0 - 4.0 - scrollbar_w,
+                    item_h - 2.0,
                     [0.20, 0.35, 0.65, 0.9],
                 ));
             }
@@ -439,32 +470,28 @@ impl Widget for FuzzelWidget {
             color: query_color,
         });
 
-        let list_y = self.y + pad + search_h + 10.0;
-        let row_h = 25.0;
-        let visible_items = 29;
+        let item_h = 25.0;
+        for (idx, item_text) in self.filtered_items.iter().enumerate() {
+            let virtual_y = idx as f32 * item_h;
+            if let Some(draw_y) = self.scroll_box.get_item_draw_y(virtual_y, item_h) {
+                let color = if idx == self.selected {
+                    [0xff, 0xff, 0xff]
+                } else {
+                    [0xbb, 0xbb, 0xc5]
+                };
 
-        let start = self.scroll_offset;
-        let end = self.filtered_items.len().min(start + visible_items);
-
-        for (i, idx) in (start..end).enumerate() {
-            let item_text = &self.filtered_items[idx];
-            let y = list_y + i as f32 * row_h + 4.0;
-            let color = if idx == self.selected {
-                [0xff, 0xff, 0xff]
-            } else {
-                [0xbb, 0xbb, 0xc5]
-            };
-
-            labels.push(TextLabel {
-                text: item_text.clone(),
-                x: self.x + pad + 10.0,
-                y,
-                font_size: 13.0,
-                color,
-            });
+                labels.push(TextLabel {
+                    text: item_text.clone(),
+                    x: self.x + pad + 10.0,
+                    y: draw_y + 4.0,
+                    font_size: 13.0,
+                    color,
+                });
+            }
         }
 
         if self.filtered_items.is_empty() {
+            let list_y = self.y + pad + search_h + 10.0;
             labels.push(TextLabel {
                 text: "No matches found".to_string(),
                 x: self.x + pad + 10.0,
@@ -479,20 +506,13 @@ impl Widget for FuzzelWidget {
 
     fn mouse_input(&mut self, button: clear_ui::widget::MouseButton, state: clear_ui::widget::ElementState, px: f32, py: f32) -> bool {
         if button == clear_ui::widget::MouseButton::Left && state == clear_ui::widget::ElementState::Pressed {
-            let pad = 15.0;
-            let search_h = 35.0;
-            let list_y = self.y + pad + search_h + 10.0;
-            let row_h = 25.0;
-            let visible_items = 29;
-
-            if px >= self.x + pad && px <= self.x + self.w - pad {
-                if py >= list_y && py < list_y + visible_items as f32 * row_h {
-                    let clicked_row = ((py - list_y) / row_h).floor() as usize;
-                    let target_idx = self.scroll_offset + clicked_row;
-                    if target_idx < self.filtered_items.len() {
-                        self.selected = target_idx;
-                        return true;
-                    }
+            let item_h = 25.0;
+            if self.scroll_box.hit_test(px, py) {
+                let click_virtual_y = py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
+                let clicked_idx = (click_virtual_y / item_h).floor() as usize;
+                if clicked_idx < self.filtered_items.len() {
+                    self.selected = clicked_idx;
+                    return true;
                 }
             }
         }
@@ -1146,6 +1166,16 @@ impl PointerHandler for AppState {
                             }
                         }
                     }
+                    PointerEventKind::Axis { horizontal, vertical, .. } => {
+                        let h_scroll = horizontal.absolute as f32;
+                        let v_scroll = vertical.absolute as f32;
+                        let delta = clear_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
+                        if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y) {
+                            st.fuzzel.update_scroll();
+                            st.upload_vertices();
+                            self.redraw = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -1314,6 +1344,7 @@ impl AppState {
                     if !st.fuzzel.filtered_items.is_empty() {
                         st.fuzzel.selected = (st.fuzzel.selected + 1).min(st.fuzzel.filtered_items.len() - 1);
                         st.fuzzel.update_scroll();
+                        st.fuzzel.snap_to_selected();
                         st.upload_vertices();
                         self.redraw = true;
                     }
@@ -1322,6 +1353,7 @@ impl AppState {
                     if st.fuzzel.selected > 0 {
                         st.fuzzel.selected -= 1;
                         st.fuzzel.update_scroll();
+                        st.fuzzel.snap_to_selected();
                         st.upload_vertices();
                         self.redraw = true;
                     }
