@@ -36,7 +36,7 @@ use glyphon::{
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Vertex {
+pub(crate) struct Vertex {
     position: [f32; 2],
     color: [f32; 4],
 }
@@ -299,6 +299,625 @@ fn spawn_command(cmd: &str) {
         .ok();
 }
 
+fn gradient_quad_vertices(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32, c0: [f32; 4], c1: [f32; 4]) -> [Vertex; 6] {
+    let x0 = (x / sw) * 2.0 - 1.0;
+    let y0 = 1.0 - (y / sh) * 2.0;
+    let x1 = ((x + w) / sw) * 2.0 - 1.0;
+    let y1 = 1.0 - ((y + h) / sh) * 2.0;
+    [
+        Vertex { position: [x0, y0], color: c0 },
+        Vertex { position: [x1, y0], color: c1 },
+        Vertex { position: [x0, y1], color: c0 },
+        Vertex { position: [x1, y0], color: c1 },
+        Vertex { position: [x1, y1], color: c1 },
+        Vertex { position: [x0, y1], color: c0 },
+    ]
+}
+
+fn parse_hex(hex: &str) -> Option<(f32, f32, f32)> {
+    let s = hex.trim_start_matches('#');
+    if s.len() == 6 {
+        u32::from_str_radix(s, 16).ok().map(|v| {
+            let r = ((v >> 16) & 0xFF) as f32 / 255.0;
+            let g = ((v >> 8) & 0xFF) as f32 / 255.0;
+            let b = (v & 0xFF) as f32 / 255.0;
+            (r, g, b)
+        })
+    } else {
+        None
+    }
+}
+
+fn rgb_to_hsl(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    let max = r.max(g.max(b));
+    let min = r.min(g.min(b));
+    let mut h = 0.0;
+    let mut s = 0.0;
+    let l = (max + min) / 2.0;
+
+    if max != min {
+        let d = max - min;
+        s = if l > 0.5 { d / (2.0 - max - min) } else { d / (max + min) };
+        if max == r {
+            h = (g - b) / d + (if g < b { 6.0 } else { 0.0 });
+        } else if max == g {
+            h = (b - r) / d + 2.0;
+        } else if max == b {
+            h = (r - g) / d + 4.0;
+        }
+        h /= 6.0;
+    }
+
+    (h, s, l)
+}
+
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (f32, f32, f32) {
+    if s == 0.0 {
+        return (l, l, l);
+    }
+
+    let q = if l < 0.5 { l * (1.0 + s) } else { l + s - l * s };
+    let p = 2.0 * l - q;
+
+    let r = hue_to_rgb(p, q, h + 1.0 / 3.0);
+    let g = hue_to_rgb(p, q, h);
+    let b = hue_to_rgb(p, q, h - 1.0 / 3.0);
+
+    (r, g, b)
+}
+
+fn hue_to_rgb(p: f32, q: f32, mut t: f32) -> f32 {
+    if t < 0.0 { t += 1.0; }
+    if t > 1.0 { t -= 1.0; }
+    if t < 1.0 / 6.0 { return p + (q - p) * 6.0 * t; }
+    if t < 1.0 / 2.0 { return q; }
+    if t < 2.0 / 3.0 { return p + (q - p) * (2.0 / 3.0 - t) * 6.0; }
+    p
+}
+
+const HEADER_H: f32 = 36.0;
+const SLIDER_ROW_H: f32 = 36.0;
+const SLIDER_START_Y: f32 = 48.0;
+const SLIDER_LABEL_X: f32 = 12.0;
+const SLIDER_TRACK_X: f32 = 32.0;
+const SLIDER_TRACK_W: f32 = 280.0;
+const SLIDER_TRACK_H: f32 = 20.0;
+const SLIDER_VALUE_X: f32 = 320.0;
+const PREVIEW_X: f32 = 12.0;
+const PREVIEW_Y: f32 = 276.0;
+const PREVIEW_W: f32 = 160.0;
+const PREVIEW_H: f32 = 72.0;
+const BUTTON_Y: f32 = 360.0;
+const BUTTON_H: f32 = 32.0;
+const BUTTON_W: f32 = 100.0;
+const BUTTON_GAP: f32 = 12.0;
+const WIN_W: f32 = 380.0;
+const WIN_H: f32 = 428.0;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DragTarget { Red, Green, Blue, Hue, Saturation, Lightness }
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColorAction { Apply, Cancel }
+
+struct RectWidget {
+    x: f32, y: f32, w: f32, h: f32,
+    color: [f32; 4],
+}
+
+struct GradientRectWidget {
+    x: f32, y: f32, w: f32, h: f32,
+    c0: [f32; 4],
+    c1: [f32; 4],
+}
+
+struct HitButton {
+    x: f32, y: f32, w: f32, h: f32,
+    action: ColorAction,
+}
+
+struct ColorPickerWidget {
+    _x: f32, _y: f32, _w: f32, _h: f32,
+    pub red: f32,
+    pub green: f32,
+    pub blue: f32,
+    pub hue: f32,
+    pub saturation: f32,
+    pub lightness: f32,
+    pub dragging: Option<DragTarget>,
+    pub action_requested: Option<ColorAction>,
+    cursor_x: f32,
+    cursor_y: f32,
+    scale_factor: f32,
+    
+    rects: Vec<RectWidget>,
+    gradient_rects: Vec<GradientRectWidget>,
+    pub labels: Vec<TextLabel>,
+    action_buttons: Vec<HitButton>,
+    pub needs_rebuild: bool,
+}
+
+impl ColorPickerWidget {
+    fn new(red: f32, green: f32, blue: f32) -> Self {
+        let (hue, saturation, lightness) = rgb_to_hsl(red, green, blue);
+        Self {
+            _x: 0.0, _y: 0.0, _w: 0.0, _h: 0.0,
+            red, green, blue,
+            hue, saturation, lightness,
+            dragging: None,
+            action_requested: None,
+            cursor_x: 0.0, cursor_y: 0.0,
+            scale_factor: 2.0,
+            rects: Vec::new(),
+            gradient_rects: Vec::new(),
+            labels: Vec::new(),
+            action_buttons: Vec::new(),
+            needs_rebuild: true,
+        }
+    }
+
+    fn hex(&self) -> String {
+        format!("#{:02X}{:02X}{:02X}",
+            (self.red * 255.0) as u8,
+            (self.green * 255.0) as u8,
+            (self.blue * 255.0) as u8)
+    }
+
+    fn rebuild_layout(&mut self, scale: f32) {
+        self.scale_factor = scale;
+        let s = scale;
+        let sw = WIN_W * s;
+        let sh = WIN_H * s;
+
+        let mut rects = Vec::new();
+        let mut gradient_rects = Vec::new();
+        let mut labels = Vec::new();
+        let mut action_buttons = Vec::new();
+
+        rects.push(RectWidget {
+            x: 0.0, y: 0.0, w: sw, h: HEADER_H * s,
+            color: clear_ui::color::HEADER_BG,
+        });
+        
+        labels.push(TextLabel {
+            text: "Clear Color Interface".to_string(),
+            x: 12.0 * s,
+            y: 10.0 * s,
+            font_size: 14.0 * s,
+            color: [0xcc, 0xcc, 0xd4],
+        });
+
+        rects.push(RectWidget {
+            x: 0.0, y: HEADER_H * s, w: sw, h: sh - HEADER_H * s,
+            color: clear_ui::color::CONTENT_BG,
+        });
+
+        let channels = [self.red, self.green, self.blue, self.hue, self.saturation, self.lightness];
+        let chan_labels = ['R', 'G', 'B', 'H', 'S', 'L'];
+
+        let red = self.red;
+        let green = self.green;
+        let blue = self.blue;
+        let hue = self.hue;
+        let saturation = self.saturation;
+        let lightness = self.lightness;
+
+        let get_color_at = |i: usize, t: f32| -> [f32; 4] {
+            match i {
+                0 => [t, green, blue, 1.0],
+                1 => [red, t, blue, 1.0],
+                2 => [red, green, t, 1.0],
+                3 => {
+                    let (r, g, b) = hsl_to_rgb(t, saturation, lightness);
+                    [r, g, b, 1.0]
+                }
+                4 => {
+                    let (r, g, b) = hsl_to_rgb(hue, t, lightness);
+                    [r, g, b, 1.0]
+                }
+                _ => {
+                    let (r, g, b) = hsl_to_rgb(hue, saturation, t);
+                    [r, g, b, 1.0]
+                }
+            }
+        };
+
+        for i in 0..6 {
+            let row_y = (SLIDER_START_Y + i as f32 * SLIDER_ROW_H) * s;
+            let track_y = row_y + ((SLIDER_ROW_H - SLIDER_TRACK_H) / 2.0) * s;
+
+            rects.push(RectWidget {
+                x: (SLIDER_TRACK_X - 1.0) * s,
+                y: track_y - 1.0 * s,
+                w: (SLIDER_TRACK_W + 2.0) * s,
+                h: (SLIDER_TRACK_H + 2.0) * s,
+                color: [0.08, 0.08, 0.10, 1.0],
+            });
+
+            let n_segments = if i == 3 { 30 } else { 10 };
+            for j in 0..n_segments {
+                let t0 = j as f32 / n_segments as f32;
+                let t1 = (j + 1) as f32 / n_segments as f32;
+                let c0 = get_color_at(i, t0);
+                let c1 = get_color_at(i, t1);
+                gradient_rects.push(GradientRectWidget {
+                    x: (SLIDER_TRACK_X + t0 * SLIDER_TRACK_W) * s,
+                    y: track_y,
+                    w: ((t1 - t0) * SLIDER_TRACK_W) * s,
+                    h: SLIDER_TRACK_H * s,
+                    c0,
+                    c1,
+                });
+            }
+
+            let indicator_w = 4.0;
+            let indicator_h = SLIDER_TRACK_H + 4.0;
+            let indicator_x = SLIDER_TRACK_X + channels[i] * SLIDER_TRACK_W - indicator_w / 2.0;
+            let indicator_y = (SLIDER_START_Y + i as f32 * SLIDER_ROW_H) + ((SLIDER_ROW_H - indicator_h) / 2.0);
+
+            rects.push(RectWidget {
+                x: (indicator_x - 1.0) * s,
+                y: (indicator_y - 1.0) * s,
+                w: (indicator_w + 2.0) * s,
+                h: (indicator_h + 2.0) * s,
+                color: [0.05, 0.05, 0.05, 0.95],
+            });
+
+            rects.push(RectWidget {
+                x: indicator_x * s,
+                y: indicator_y * s,
+                w: indicator_w * s,
+                h: indicator_h * s,
+                color: [1.0, 1.0, 1.0, 1.0],
+            });
+
+            labels.push(TextLabel {
+                text: chan_labels[i].to_string(),
+                x: SLIDER_LABEL_X * s,
+                y: row_y + 4.0 * s,
+                font_size: 12.0 * s,
+                color: [0xaa, 0xaa, 0xbb],
+            });
+
+            let val = if i < 3 {
+                format!("{}", (channels[i] * 255.0) as u8)
+            } else if i == 3 {
+                format!("{}°", (channels[i] * 360.0).round() as u16)
+            } else {
+                format!("{}%", (channels[i] * 100.0).round() as u8)
+            };
+            
+            labels.push(TextLabel {
+                text: val,
+                x: SLIDER_VALUE_X * s,
+                y: row_y + 4.0 * s,
+                font_size: 11.0 * s,
+                color: [0xcc, 0xcc, 0xdd],
+            });
+        }
+
+        rects.push(RectWidget {
+            x: PREVIEW_X * s, y: PREVIEW_Y * s,
+            w: PREVIEW_W * s, h: PREVIEW_H * s,
+            color: [self.red, self.green, self.blue, 1.0],
+        });
+
+        let hex = self.hex();
+        labels.push(TextLabel {
+            text: hex,
+            x: (PREVIEW_X + PREVIEW_W + 16.0) * s,
+            y: (PREVIEW_Y + 26.0) * s,
+            font_size: 16.0 * s,
+            color: [0xe0, 0xe0, 0xe8],
+        });
+
+        let apply_x = PREVIEW_X;
+        let cancel_x = PREVIEW_X + BUTTON_W + BUTTON_GAP;
+        let btn_y = BUTTON_Y;
+        let btn_bg = [0.20, 0.40, 0.65, 1.0];
+        let cancel_bg = [0.40, 0.20, 0.20, 1.0];
+
+        rects.push(RectWidget {
+            x: apply_x * s, y: btn_y * s,
+            w: BUTTON_W * s, h: BUTTON_H * s,
+            color: btn_bg,
+        });
+        labels.push(TextLabel {
+            text: "Apply".to_string(),
+            x: (apply_x + 28.0) * s,
+            y: (btn_y + 8.0) * s,
+            font_size: 12.0 * s,
+            color: [0xee, 0xee, 0xf0],
+        });
+        action_buttons.push(HitButton {
+            x: apply_x * s, y: btn_y * s,
+            w: BUTTON_W * s, h: BUTTON_H * s,
+            action: ColorAction::Apply,
+        });
+
+        rects.push(RectWidget {
+            x: cancel_x * s, y: btn_y * s,
+            w: BUTTON_W * s, h: BUTTON_H * s,
+            color: cancel_bg,
+        });
+        labels.push(TextLabel {
+            text: "Cancel".to_string(),
+            x: (cancel_x + 22.0) * s,
+            y: (btn_y + 8.0) * s,
+            font_size: 12.0 * s,
+            color: [0xee, 0xee, 0xf0],
+        });
+        action_buttons.push(HitButton {
+            x: cancel_x * s, y: btn_y * s,
+            w: BUTTON_W * s, h: BUTTON_H * s,
+            action: ColorAction::Cancel,
+        });
+
+        self.rects = rects;
+        self.gradient_rects = gradient_rects;
+        self.labels = labels;
+        self.action_buttons = action_buttons;
+        self.needs_rebuild = false;
+    }
+
+    fn slider_physical_rect(i: usize, s: f32) -> (f32, f32, f32, f32) {
+        let row_y = (SLIDER_START_Y + i as f32 * SLIDER_ROW_H) * s;
+        let track_y = row_y + ((SLIDER_ROW_H - SLIDER_TRACK_H) / 2.0) * s;
+        (SLIDER_TRACK_X * s, track_y, SLIDER_TRACK_W * s, SLIDER_TRACK_H * s)
+    }
+
+    fn collect_vertices(&self, sw: f32, sh: f32) -> Vec<Vertex> {
+        let mut verts = Vec::new();
+        for r in &self.rects {
+            verts.extend(quad_vertices(r.x, r.y, r.w, r.h, sw, sh, r.color));
+        }
+        for g in &self.gradient_rects {
+            verts.extend(gradient_quad_vertices(g.x, g.y, g.w, g.h, sw, sh, g.c0, g.c1));
+        }
+        verts
+    }
+
+    fn handle_cursor_moved(&mut self, cx: f32, cy: f32) {
+        self.cursor_x = cx;
+        self.cursor_y = cy;
+        if let Some(drag) = self.dragging {
+            let i = match drag {
+                DragTarget::Red => 0,
+                DragTarget::Green => 1,
+                DragTarget::Blue => 2,
+                DragTarget::Hue => 3,
+                DragTarget::Saturation => 4,
+                DragTarget::Lightness => 5,
+            };
+            let s = self.scale_factor;
+            let (tx, _, tw, _) = Self::slider_physical_rect(i, s);
+            let new_val = ((self.cursor_x - tx) / tw).clamp(0.0, 1.0);
+            let old = match i {
+                0 => self.red,
+                1 => self.green,
+                2 => self.blue,
+                3 => self.hue,
+                4 => self.saturation,
+                _ => self.lightness,
+            };
+            if (new_val - old).abs() > 0.002 {
+                match i {
+                    0 => {
+                        self.red = new_val;
+                        let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                        self.saturation = sat;
+                        self.lightness = l;
+                        if sat > 0.001 && l > 0.001 && l < 0.999 {
+                            self.hue = h;
+                        }
+                    }
+                    1 => {
+                        self.green = new_val;
+                        let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                        self.saturation = sat;
+                        self.lightness = l;
+                        if sat > 0.001 && l > 0.001 && l < 0.999 {
+                            self.hue = h;
+                        }
+                    }
+                    2 => {
+                        self.blue = new_val;
+                        let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                        self.saturation = sat;
+                        self.lightness = l;
+                        if sat > 0.001 && l > 0.001 && l < 0.999 {
+                            self.hue = h;
+                        }
+                    }
+                    3 => {
+                        self.hue = new_val;
+                        let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                        self.red = r;
+                        self.green = g;
+                        self.blue = b;
+                    }
+                    4 => {
+                        self.saturation = new_val;
+                        let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                        self.red = r;
+                        self.green = g;
+                        self.blue = b;
+                    }
+                    _ => {
+                        self.lightness = new_val;
+                        let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                        self.red = r;
+                        self.green = g;
+                        self.blue = b;
+                    }
+                }
+                self.needs_rebuild = true;
+            }
+        }
+    }
+
+    fn handle_mouse_input(&mut self, state: clear_ui::widget::ElementState) {
+        match state {
+            clear_ui::widget::ElementState::Pressed => {
+                let s = self.scale_factor;
+                let (px, py) = (self.cursor_x, self.cursor_y);
+                for i in 0..6 {
+                    let (tx, ty, tw, th) = Self::slider_physical_rect(i, s);
+                    if px >= tx && px <= tx + tw && py >= ty && py <= ty + th {
+                        let val = ((px - tx) / tw).clamp(0.0, 1.0);
+                        match i {
+                            0 => {
+                                self.red = val;
+                                let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                                self.saturation = sat;
+                                self.lightness = l;
+                                if sat > 0.001 && l > 0.001 && l < 0.999 {
+                                    self.hue = h;
+                                }
+                                self.dragging = Some(DragTarget::Red);
+                            }
+                            1 => {
+                                self.green = val;
+                                let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                                self.saturation = sat;
+                                self.lightness = l;
+                                if sat > 0.001 && l > 0.001 && l < 0.999 {
+                                    self.hue = h;
+                                }
+                                self.dragging = Some(DragTarget::Green);
+                            }
+                            2 => {
+                                self.blue = val;
+                                let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                                self.saturation = sat;
+                                self.lightness = l;
+                                if sat > 0.001 && l > 0.001 && l < 0.999 {
+                                    self.hue = h;
+                                }
+                                self.dragging = Some(DragTarget::Blue);
+                            }
+                            3 => {
+                                self.hue = val;
+                                let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                                self.red = r;
+                                self.green = g;
+                                self.blue = b;
+                                self.dragging = Some(DragTarget::Hue);
+                            }
+                            4 => {
+                                self.saturation = val;
+                                let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                                self.red = r;
+                                self.green = g;
+                                self.blue = b;
+                                self.dragging = Some(DragTarget::Saturation);
+                            }
+                            _ => {
+                                self.lightness = val;
+                                let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                                self.red = r;
+                                self.green = g;
+                                self.blue = b;
+                                self.dragging = Some(DragTarget::Lightness);
+                            }
+                        }
+                        self.needs_rebuild = true;
+                        return;
+                    }
+                }
+                for btn in &self.action_buttons {
+                    if px >= btn.x && px <= btn.x + btn.w && py >= btn.y && py <= btn.y + btn.h {
+                        self.action_requested = Some(btn.action);
+                        self.needs_rebuild = true;
+                        return;
+                    }
+                }
+            }
+            clear_ui::widget::ElementState::Released => {
+                if self.dragging.is_some() {
+                    self.dragging = None;
+                }
+            }
+        }
+    }
+
+    fn handle_scroll(&mut self, scroll_amount_y: f32) {
+        let s = self.scale_factor;
+        let (px, py) = (self.cursor_x, self.cursor_y);
+        let scroll_amount = scroll_amount_y;
+        if scroll_amount.abs() > 0.0001 {
+            for i in 0..6 {
+                let (tx, ty, tw, th) = Self::slider_physical_rect(i, s);
+                if px >= tx && px <= tx + tw && py >= ty - 4.0 * s && py <= ty + th + 4.0 * s {
+                    let step = 0.02;
+                    let old_val = match i {
+                        0 => self.red,
+                        1 => self.green,
+                        2 => self.blue,
+                        3 => self.hue,
+                        4 => self.saturation,
+                        _ => self.lightness,
+                    };
+                    let new_val = (old_val + scroll_amount * step).clamp(0.0, 1.0);
+                    if (new_val - old_val).abs() > 0.0001 {
+                        match i {
+                            0 => {
+                                self.red = new_val;
+                                let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                                self.saturation = sat;
+                                self.lightness = l;
+                                if sat > 0.001 && l > 0.001 && l < 0.999 {
+                                    self.hue = h;
+                                }
+                            }
+                            1 => {
+                                self.green = new_val;
+                                let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                                self.saturation = sat;
+                                self.lightness = l;
+                                if sat > 0.001 && l > 0.001 && l < 0.999 {
+                                    self.hue = h;
+                                }
+                            }
+                            2 => {
+                                self.blue = new_val;
+                                let (h, sat, l) = rgb_to_hsl(self.red, self.green, self.blue);
+                                self.saturation = sat;
+                                self.lightness = l;
+                                if sat > 0.001 && l > 0.001 && l < 0.999 {
+                                    self.hue = h;
+                                }
+                            }
+                            3 => {
+                                self.hue = new_val;
+                                let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                                self.red = r;
+                                self.green = g;
+                                self.blue = b;
+                            }
+                            4 => {
+                                self.saturation = new_val;
+                                let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                                self.red = r;
+                                self.green = g;
+                                self.blue = b;
+                            }
+                            _ => {
+                                self.lightness = new_val;
+                                let (r, g, b) = hsl_to_rgb(self.hue, self.saturation, self.lightness);
+                                self.red = r;
+                                self.green = g;
+                                self.blue = b;
+                            }
+                        }
+                        self.needs_rebuild = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 pub struct FuzzelWidget {
     x: f32,
@@ -525,6 +1144,7 @@ enum LauncherMode {
     Dmenu,
     Path,
     Apps,
+    Color,
 }
 
 #[derive(Debug, Clone)]
@@ -550,6 +1170,7 @@ struct State {
     vertex_count: u32,
 
     fuzzel: FuzzelWidget,
+    color_picker: Option<ColorPickerWidget>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,
@@ -578,9 +1199,14 @@ impl State {
         prompt: String,
         stdin_sender: calloop::channel::Sender<()>,
         mode: LauncherMode,
+        initial_hex: Option<String>,
+        scale: f64,
     ) -> Self {
-        let scale = 2.0f64;
-        let (width, height) = (600, 800);
+        let (width, height) = if mode == LauncherMode::Color {
+            (WIN_W as u32, WIN_H as u32)
+        } else {
+            (600, 800)
+        };
         let pw = (width as f64 * scale) as u32;
         let ph = (height as f64 * scale) as u32;
         let lw = width as f32;
@@ -588,15 +1214,20 @@ impl State {
 
         let wl_surface = compositor_state.create_surface(qh);
         wl_surface.set_buffer_scale(scale as i32);
+        let app_id = if mode == LauncherMode::Color {
+            "clear-color-interface".to_string()
+        } else {
+            "clear-cloud".to_string()
+        };
         let window = layer_shell_state.create_layer_surface(
             qh,
             wl_surface.clone(),
             Layer::Overlay,
-            Some("clear-cloud".to_string()),
+            Some(app_id),
             None,
         );
         window.set_size(width, height);
-        window.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        window.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
         window.set_anchor(Anchor::empty());
         wl_surface.commit();
 
@@ -755,6 +1386,18 @@ impl State {
             }
         }
 
+        let color_picker = if mode == LauncherMode::Color {
+            let (r, g, b) = initial_hex
+                .as_ref()
+                .and_then(|h| parse_hex(h))
+                .unwrap_or((0.5, 0.5, 0.5));
+            let mut cp = ColorPickerWidget::new(r, g, b);
+            cp.rebuild_layout(scale as f32);
+            Some(cp)
+        } else {
+            None
+        };
+
         let mut state = Self {
             window,
             wl_surface,
@@ -766,6 +1409,7 @@ impl State {
             vertex_buffer,
             vertex_count: 0,
             fuzzel,
+            color_picker,
             font_system,
             swash_cache,
             text_atlas,
@@ -803,13 +1447,27 @@ impl State {
 
     fn apply_layout(&mut self) {
         let (w, h) = (self.width, self.height);
-        self.fuzzel.set_rect(0.0, 0.0, w, h);
+        if self.mode == LauncherMode::Color {
+            if let Some(cp) = &mut self.color_picker {
+                cp.rebuild_layout(self.scale as f32);
+            }
+        } else {
+            self.fuzzel.set_rect(0.0, 0.0, w, h);
+        }
     }
 
     fn collect_vertices(&self) -> Vec<Vertex> {
         let sw = self.width;
         let sh = self.height;
-        widget_vertices(&self.fuzzel, sw, sh)
+        if self.mode == LauncherMode::Color {
+            if let Some(cp) = &self.color_picker {
+                cp.collect_vertices(self.physical_width as f32, self.physical_height as f32)
+            } else {
+                Vec::new()
+            }
+        } else {
+            widget_vertices(&self.fuzzel, sw, sh)
+        }
     }
 
     fn upload_vertices(&mut self) {
@@ -844,6 +1502,8 @@ impl State {
             physical_height,
             scale,
             ref fuzzel,
+            ref color_picker,
+            ref mode,
             ..
         } = self;
 
@@ -856,17 +1516,32 @@ impl State {
         let mut widget_buffers: Vec<Buffer> = Vec::new();
         let mut widget_labels: Vec<TextLabel> = Vec::new();
 
-        for label in fuzzel.text_labels() {
+        let is_color_mode = *mode == LauncherMode::Color;
+        if is_color_mode {
+            if let Some(cp) = color_picker {
+                for label in &cp.labels {
+                    widget_labels.push(label.clone());
+                }
+            }
+        } else {
+            for label in fuzzel.text_labels() {
+                widget_labels.push(label);
+            }
+        }
+
+        for label in &widget_labels {
             widget_buffers.push(make_text_buffer(font_system, &label.text, label.font_size));
-            widget_labels.push(label);
         }
 
         for (buf, label) in widget_buffers.iter().zip(widget_labels.iter()) {
+            let left = if is_color_mode { label.x } else { label.x * scale_f32 };
+            let top = if is_color_mode { label.y } else { label.y * scale_f32 };
+            let scale = if is_color_mode { 1.0 } else { scale_f32 };
             areas.push(TextArea {
                 buffer: buf,
-                left: label.x * scale_f32,
-                top: label.y * scale_f32,
-                scale: scale_f32,
+                left,
+                top,
+                scale,
                 bounds: TextBounds {
                     left: 0,
                     top: 0,
@@ -892,7 +1567,13 @@ impl State {
             self.config.width = width;
             self.config.height = height;
             self.surface.configure(&self.device, &self.config);
-            self.apply_layout();
+            if self.mode == LauncherMode::Color {
+                if let Some(cp) = &mut self.color_picker {
+                    cp.rebuild_layout(self.scale as f32);
+                }
+            } else {
+                self.apply_layout();
+            }
             self.upload_vertices();
         }
     }
@@ -971,8 +1652,8 @@ struct AppState {
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
 
-    window: LayerSurface,
-    surface: wl_surface::WlSurface,
+    window: Option<LayerSurface>,
+    surface: Option<wl_surface::WlSurface>,
 
     state: Option<State>,
     exit: bool,
@@ -1122,58 +1803,136 @@ impl PointerHandler for AppState {
     ) {
         use smithay_client_toolkit::seat::pointer::PointerEventKind;
         for event in events {
-            let (x, y) = event.position;
             if let Some(st) = &mut self.state {
-                let scale = st.scale;
-                let cx = (x * scale) as f32;
-                let cy = (y * scale) as f32;
+                let (cx, cy) = clear_ui::wayland::scale_pointer_pos(event.position, st.scale);
                 match &event.kind {
                     PointerEventKind::Motion { .. } => {
                         st.cursor_x = cx;
                         st.cursor_y = cy;
-                    }
-                    PointerEventKind::Press { button, .. } => {
-                        if *button == 272 {
-                            st.cursor_x = cx;
-                            st.cursor_y = cy;
-                            let prev_selected = st.fuzzel.selected;
-                            let changed = st.fuzzel.mouse_input(
-                                clear_ui::widget::MouseButton::Left,
-                                clear_ui::widget::ElementState::Pressed,
-                                st.cursor_x,
-                                st.cursor_y,
-                            );
-                            if changed {
-                                if st.fuzzel.selected == prev_selected {
-                                    if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
-                                        println!("{}", item);
-                                        match st.mode {
-                                            LauncherMode::Apps => {
-                                                if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
-                                                    spawn_command(&app.exec);
-                                                }
-                                            }
-                                            LauncherMode::Path => {
-                                                spawn_command(item);
-                                            }
-                                            LauncherMode::Dmenu => {}
-                                        }
-                                        self.exit = true;
-                                    }
+                        if st.mode == LauncherMode::Color {
+                            let mut needs_rebuild = false;
+                            if let Some(cp) = &mut st.color_picker {
+                                cp.handle_cursor_moved(cx, cy);
+                                if cp.needs_rebuild {
+                                    cp.rebuild_layout(st.scale as f32);
+                                    needs_rebuild = true;
                                 }
+                            }
+                            if needs_rebuild {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
                         }
                     }
+                    PointerEventKind::Press { button, .. } => {
+                        if *button == 272 {
+                            st.cursor_x = cx;
+                            st.cursor_y = cy;
+                            if st.mode == LauncherMode::Color {
+                                let mut needs_rebuild = false;
+                                let mut action_requested = None;
+                                let mut hex = String::new();
+                                if let Some(cp) = &mut st.color_picker {
+                                    cp.handle_mouse_input(clear_ui::widget::ElementState::Pressed);
+                                    if cp.needs_rebuild {
+                                        cp.rebuild_layout(st.scale as f32);
+                                        needs_rebuild = true;
+                                    }
+                                    if let Some(action) = cp.action_requested {
+                                        action_requested = Some(action);
+                                        hex = cp.hex();
+                                    }
+                                }
+                                if needs_rebuild {
+                                    st.upload_vertices();
+                                    self.redraw = true;
+                                }
+                                if let Some(action) = action_requested {
+                                    match action {
+                                        ColorAction::Apply => {
+                                            println!("{}", hex);
+                                            self.exit = true;
+                                        }
+                                        ColorAction::Cancel => {
+                                            self.exit = true;
+                                        }
+                                    }
+                                }
+                            } else {
+                                let prev_selected = st.fuzzel.selected;
+                                let changed = st.fuzzel.mouse_input(
+                                    clear_ui::widget::MouseButton::Left,
+                                    clear_ui::widget::ElementState::Pressed,
+                                    st.cursor_x,
+                                    st.cursor_y,
+                                );
+                                if changed {
+                                    if st.fuzzel.selected == prev_selected {
+                                        if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                                            println!("{}", item);
+                                            match st.mode {
+                                                LauncherMode::Apps => {
+                                                    if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                                        spawn_command(&app.exec);
+                                                    }
+                                                }
+                                                LauncherMode::Path => {
+                                                    spawn_command(item);
+                                                }
+                                                LauncherMode::Dmenu => {}
+                                                LauncherMode::Color => {}
+                                            }
+                                            self.exit = true;
+                                        }
+                                    }
+                                    st.upload_vertices();
+                                    self.redraw = true;
+                                }
+                            }
+                        }
+                    }
+                    PointerEventKind::Release { button, .. } => {
+                        if *button == 272 {
+                            if st.mode == LauncherMode::Color {
+                                let mut needs_rebuild = false;
+                                if let Some(cp) = &mut st.color_picker {
+                                    cp.handle_mouse_input(clear_ui::widget::ElementState::Released);
+                                    if cp.needs_rebuild {
+                                        cp.rebuild_layout(st.scale as f32);
+                                        needs_rebuild = true;
+                                    }
+                                }
+                                if needs_rebuild {
+                                    st.upload_vertices();
+                                    self.redraw = true;
+                                }
+                            }
+                        }
+                    }
                     PointerEventKind::Axis { horizontal, vertical, .. } => {
-                        let h_scroll = horizontal.absolute as f32;
-                        let v_scroll = vertical.absolute as f32;
-                        let delta = clear_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
-                        if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y) {
-                            st.fuzzel.update_scroll();
-                            st.upload_vertices();
-                            self.redraw = true;
+                        if st.mode == LauncherMode::Color {
+                            let mut needs_rebuild = false;
+                            if let Some(cp) = &mut st.color_picker {
+                                let v_scroll = vertical.absolute as f32;
+                                cp.handle_scroll(-v_scroll / 10.0);
+                                if cp.needs_rebuild {
+                                    cp.rebuild_layout(st.scale as f32);
+                                    needs_rebuild = true;
+                                }
+                            }
+                            if needs_rebuild {
+                                st.upload_vertices();
+                                self.redraw = true;
+                            }
+                        } else {
+                            let h_scroll = horizontal.absolute as f32;
+                            let v_scroll = vertical.absolute as f32;
+                            let delta = clear_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
+                            if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y) {
+                                st.fuzzel.update_scroll();
+                                st.upload_vertices();
+                                self.redraw = true;
+                            }
                         }
                     }
                     _ => {}
@@ -1202,7 +1961,9 @@ impl KeyboardHandler for AppState {
         _keyboard: &wl_keyboard::WlKeyboard,
         _surface: &wl_surface::WlSurface,
         _serial: u32,
-    ) {}
+    ) {
+        self.exit = true;
+    }
 
     fn press_key(
         &mut self,
@@ -1252,7 +2013,9 @@ impl LayerShellHandler for AppState {
     ) {
         let (width, height) = configure.new_size;
         if let Some(state) = &mut self.state {
-            state.resize(width, height);
+            let pw = (width as f64 * state.scale) as u32;
+            let ph = (height as f64 * state.scale) as u32;
+            state.resize(pw, ph);
         }
         self.redraw = true;
     }
@@ -1319,61 +2082,79 @@ impl AppState {
 
         if let Some(st) = &mut self.state {
             let mut handled = true;
-            match &logical_key {
-                Key::Named(NamedKey::Escape) => {
-                    self.exit = true;
-                }
-                Key::Named(NamedKey::Enter) => {
-                    if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
-                        println!("{}", item);
-                        match st.mode {
-                            LauncherMode::Apps => {
-                                if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
-                                    spawn_command(&app.exec);
-                                }
-                            }
-                            LauncherMode::Path => {
-                                spawn_command(item);
-                            }
-                            LauncherMode::Dmenu => {}
+            if st.mode == LauncherMode::Color {
+                match &logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.exit = true;
+                    }
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(cp) = &st.color_picker {
+                            println!("{}", cp.hex());
                         }
                         self.exit = true;
                     }
-                }
-                Key::Named(NamedKey::ArrowDown) => {
-                    if !st.fuzzel.filtered_items.is_empty() {
-                        st.fuzzel.selected = (st.fuzzel.selected + 1).min(st.fuzzel.filtered_items.len() - 1);
-                        st.fuzzel.update_scroll();
-                        st.fuzzel.snap_to_selected();
-                        st.upload_vertices();
-                        self.redraw = true;
+                    _ => {
+                        handled = false;
                     }
                 }
-                Key::Named(NamedKey::ArrowUp) => {
-                    if st.fuzzel.selected > 0 {
-                        st.fuzzel.selected -= 1;
-                        st.fuzzel.update_scroll();
-                        st.fuzzel.snap_to_selected();
-                        st.upload_vertices();
-                        self.redraw = true;
+            } else {
+                match &logical_key {
+                    Key::Named(NamedKey::Escape) => {
+                        self.exit = true;
                     }
-                }
-                Key::Named(NamedKey::Backspace) => {
-                    st.fuzzel.query.pop();
-                    st.fuzzel.filter();
-                    st.upload_vertices();
-                    self.redraw = true;
-                }
-                _ => {
-                    if let Some(text) = &event.utf8 {
-                        for ch in text.chars().filter(|c| !c.is_control()) {
-                            st.fuzzel.query.push(ch);
+                    Key::Named(NamedKey::Enter) => {
+                        if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                            println!("{}", item);
+                            match st.mode {
+                                LauncherMode::Apps => {
+                                    if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                        spawn_command(&app.exec);
+                                    }
+                                }
+                                LauncherMode::Path => {
+                                    spawn_command(item);
+                                }
+                                LauncherMode::Dmenu => {}
+                                LauncherMode::Color => {}
+                            }
+                            self.exit = true;
                         }
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        if !st.fuzzel.filtered_items.is_empty() {
+                            st.fuzzel.selected = (st.fuzzel.selected + 1).min(st.fuzzel.filtered_items.len() - 1);
+                            st.fuzzel.update_scroll();
+                            st.fuzzel.snap_to_selected();
+                            st.upload_vertices();
+                            self.redraw = true;
+                        }
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        if st.fuzzel.selected > 0 {
+                            st.fuzzel.selected -= 1;
+                            st.fuzzel.update_scroll();
+                            st.fuzzel.snap_to_selected();
+                            st.upload_vertices();
+                            self.redraw = true;
+                        }
+                    }
+                    Key::Named(NamedKey::Backspace) => {
+                        st.fuzzel.query.pop();
                         st.fuzzel.filter();
                         st.upload_vertices();
                         self.redraw = true;
-                    } else {
-                        handled = false;
+                    }
+                    _ => {
+                        if let Some(text) = &event.utf8 {
+                            for ch in text.chars().filter(|c| !c.is_control()) {
+                                st.fuzzel.query.push(ch);
+                            }
+                            st.fuzzel.filter();
+                            st.upload_vertices();
+                            self.redraw = true;
+                        } else {
+                            handled = false;
+                        }
                     }
                 }
             }
@@ -1391,42 +2172,70 @@ fn main() {
     } else {
         LauncherMode::Path
     };
+    let mut initial_hex: Option<String> = None;
 
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
+    let args = std::env::args().skip(1).collect::<Vec<String>>();
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
         if arg == "-p" || arg == "--prompt" {
-            if let Some(p) = args.next() {
-                prompt = p;
+            if i + 1 < args.len() {
+                prompt = args[i + 1].clone();
+                i += 2;
+            } else {
+                i += 1;
             }
         } else if arg == "--mode" {
-            if let Some(m) = args.next() {
+            if i + 1 < args.len() {
+                let m = &args[i + 1];
                 if io::stdin().is_terminal() {
                     match m.as_str() {
-                        "apps" => mode = LauncherMode::Apps,
+                        "apps" | "app" => mode = LauncherMode::Apps,
                         "path" => mode = LauncherMode::Path,
                         "dmenu" => mode = LauncherMode::Dmenu,
+                        "color" => mode = LauncherMode::Color,
                         _ => eprintln!("Unknown mode: {}", m),
                     }
                 }
+                i += 2;
+            } else {
+                i += 1;
             }
-        } else if arg == "--apps" {
+        } else if arg == "--apps" || arg == "--app" {
             if io::stdin().is_terminal() {
                 mode = LauncherMode::Apps;
             }
+            i += 1;
         } else if arg == "--path" {
             if io::stdin().is_terminal() {
                 mode = LauncherMode::Path;
             }
+            i += 1;
         } else if arg == "--dmenu" {
             if io::stdin().is_terminal() {
                 mode = LauncherMode::Dmenu;
             }
+            i += 1;
+        } else if arg == "--color" {
+            if io::stdin().is_terminal() {
+                mode = LauncherMode::Color;
+                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    initial_hex = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        } else {
+            i += 1;
         }
     }
 
     let conn = Connection::connect_to_env().unwrap();
     let conn_clone = conn.clone();
-    let (globals, event_queue) = registry_queue_init(&conn).unwrap();
+    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
 
     let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
@@ -1436,16 +2245,6 @@ fn main() {
     let output_state = OutputState::new(&globals, &qh);
 
     let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
-
-    let state = pollster::block_on(State::new(
-        &conn,
-        &qh,
-        &compositor_state,
-        &layer_shell_state,
-        prompt,
-        stdin_sender,
-        mode,
-    ));
 
     let mut app = AppState {
         registry_state: RegistryState::new(&globals),
@@ -1457,12 +2256,33 @@ fn main() {
         seats: Vec::new(),
         pointer: None,
         keyboard: None,
-        window: state.window.clone(),
-        surface: state.wl_surface.clone(),
-        state: Some(state),
+        window: None,
+        surface: None,
+        state: None,
         exit: false,
         redraw: true,
     };
+
+    // Perform a roundtrip to populate output_state with active output scales
+    event_queue.roundtrip(&mut app).unwrap();
+
+    let scale = clear_ui::wayland::detect_scale_factor(&app.output_state);
+
+    let state = pollster::block_on(State::new(
+        &conn,
+        &qh,
+        &app.compositor_state,
+        &app.layer_shell_state,
+        prompt,
+        stdin_sender,
+        mode,
+        initial_hex,
+        scale,
+    ));
+
+    app.window = Some(state.window.clone());
+    app.surface = Some(state.wl_surface.clone());
+    app.state = Some(state);
 
     let mut event_loop = calloop::EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
