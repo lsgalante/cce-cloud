@@ -292,11 +292,28 @@ fn scan_apps() -> Vec<AppInfo> {
 }
 
 fn spawn_command(cmd: &str) {
-    std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .spawn()
-        .ok();
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/clear-spawn.log")
+    {
+        let mut f = file;
+        use std::io::Write;
+        let _ = writeln!(f, "[spawn] executing: {}", cmd);
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .stdout(f.try_clone().unwrap())
+            .stderr(f)
+            .spawn()
+            .ok();
+    } else {
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .spawn()
+            .ok();
+    }
 }
 
 fn gradient_quad_vertices(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32, c0: [f32; 4], c1: [f32; 4]) -> [Vertex; 6] {
