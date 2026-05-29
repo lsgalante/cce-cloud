@@ -1625,7 +1625,7 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05, g: 0.05, b: 0.08, a: 0.92,
+                            r: 0.05, g: 0.05, b: 0.08, a: 0.20,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1675,6 +1675,7 @@ struct AppState {
     state: Option<State>,
     exit: bool,
     redraw: bool,
+    ctrl_pressed: bool,
 }
 
 impl CompositorHandler for AppState {
@@ -2010,9 +2011,11 @@ impl KeyboardHandler for AppState {
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
         _serial: u32,
-        _modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
+        modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
         _layout: u32,
-    ) {}
+    ) {
+        self.ctrl_pressed = modifiers.ctrl;
+    }
 }
 
 impl LayerShellHandler for AppState {
@@ -2088,6 +2091,8 @@ impl AppState {
             xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
             xkeysym::Keysym::Delete => Key::Named(NamedKey::Delete),
             xkeysym::Keysym::space => Key::Named(NamedKey::Space),
+            xkeysym::Keysym::n if self.ctrl_pressed => Key::Named(NamedKey::ArrowDown),
+            xkeysym::Keysym::p if self.ctrl_pressed => Key::Named(NamedKey::ArrowUp),
             _ => {
                 if let Some(ref text) = event.utf8 {
                     Key::Character(text.clone())
@@ -2278,6 +2283,7 @@ fn main() {
         state: None,
         exit: false,
         redraw: true,
+        ctrl_pressed: false,
     };
 
     // Perform a roundtrip to populate output_state with active output scales
