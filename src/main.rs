@@ -1232,6 +1232,9 @@ struct State {
     apps: Vec<AppInfo>,
     opacity: f32,
     fade_factor: f32,
+    max_width: u32,
+    max_height: u32,
+    select_item: Option<String>,
 }
 
 impl State {
@@ -1244,7 +1247,10 @@ impl State {
         stdin_sender: calloop::channel::Sender<()>,
         mode: LauncherMode,
         initial_hex: Option<String>,
+        x_pos: Option<i32>,
+        y_pos: Option<i32>,
         scale: f64,
+        select_item: Option<String>,
     ) -> Self {
         let (width, height) = if mode == LauncherMode::Color {
             (WIN_W as u32, WIN_H as u32)
@@ -1272,7 +1278,14 @@ impl State {
         );
         window.set_size(width, height);
         window.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
-        window.set_anchor(Anchor::empty());
+        if x_pos.is_some() || y_pos.is_some() {
+            let x = x_pos.unwrap_or(0);
+            let y = y_pos.unwrap_or(0);
+            window.set_anchor(Anchor::TOP | Anchor::LEFT);
+            window.set_margin(y, 0, 0, x);
+        } else {
+            window.set_anchor(Anchor::empty());
+        }
         wl_surface.commit();
 
         let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
@@ -1473,9 +1486,13 @@ impl State {
             apps,
             opacity,
             fade_factor: 1.0,
+            max_width: width,
+            max_height: height,
+            select_item,
         };
 
         state.check_stdin_updates();
+        state.update_desired_size();
         state.apply_layout();
         state.upload_vertices();
         state
@@ -1486,11 +1503,81 @@ impl State {
             if lock.new_data {
                 lock.new_data = false;
                 let items = lock.items.clone();
+                eprintln!("[clear-cloud debug] check_stdin_updates: items={:?}, select_item={:?}, currently selected={}", items, self.select_item, self.fuzzel.selected);
                 self.fuzzel.set_items(items);
+                if let Some(ref select_name) = self.select_item {
+                    let select_lower = select_name.to_lowercase();
+                    if let Some(idx) = self.fuzzel.filtered_items.iter().position(|item| item.to_lowercase() == select_lower) {
+                        eprintln!("[clear-cloud debug] Found match for select_item {:?} at index {}, setting selected", select_name, idx);
+                        self.fuzzel.selected = idx;
+                        self.fuzzel.update_scroll();
+                        self.fuzzel.snap_to_selected();
+                        self.select_item = None;
+                    } else {
+                        eprintln!("[clear-cloud debug] No match found for select_item {:?} in filtered_items {:?}", select_name, self.fuzzel.filtered_items);
+                    }
+                }
+                eprintln!("[clear-cloud debug] check_stdin_updates done: selected={}", self.fuzzel.selected);
                 return true;
             }
         }
         false
+    }
+
+    fn update_desired_size(&mut self) {
+        if self.mode == LauncherMode::Color {
+            return;
+        }
+        let num_items = self.fuzzel.filtered_items.len();
+        let item_count = if num_items == 0 { 1 } else { num_items };
+        let needed_height = 75.0 + (item_count as f32) * 25.0;
+        let target_height = needed_height.min(self.max_height as f32);
+
+        // Calculate max text width
+        let mut max_text_w: f32 = 0.0;
+        
+        let query_text = if self.fuzzel.query.is_empty() {
+            format!("{}{}", self.fuzzel.prompt, "Type to search...")
+        } else {
+            format!("{}{}", self.fuzzel.prompt, self.fuzzel.query)
+        };
+        let buf = make_text_buffer(&mut self.font_system, &query_text, 14.0);
+        let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
+        if tw > max_text_w {
+            max_text_w = tw;
+        }
+
+        if self.fuzzel.filtered_items.is_empty() {
+            let buf = make_text_buffer(&mut self.font_system, "No matches found", 13.0);
+            let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
+            if tw > max_text_w {
+                max_text_w = tw;
+            }
+        } else {
+            for item in &self.fuzzel.filtered_items {
+                let buf = make_text_buffer(&mut self.font_system, item, 13.0);
+                let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
+                if tw > max_text_w {
+                    max_text_w = tw;
+                }
+            }
+        }
+
+        let scrollbar_w = if needed_height > self.max_height as f32 { 10.0 } else { 0.0 };
+        let needed_width = max_text_w + 50.0 + scrollbar_w;
+        let target_width = needed_width.clamp(300.0, self.max_width as f32);
+
+        let target_height_u32 = target_height.round() as u32;
+        let target_width_u32 = target_width.round() as u32;
+        
+        if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
+            self.window.set_size(target_width_u32, target_height_u32);
+            self.wl_surface.commit();
+            
+            let pw = (target_width_u32 as f64 * self.scale) as u32;
+            let ph = (target_height_u32 as f64 * self.scale) as u32;
+            self.resize(pw, ph);
+        }
     }
 
     fn apply_layout(&mut self) {
@@ -1880,6 +1967,7 @@ impl PointerHandler for AppState {
         let mut should_close = false;
         for event in events {
             if let Some(st) = &mut self.state {
+                eprintln!("[clear-cloud pointer] Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
                 let (cx, cy) = clear_ui::wayland::scale_pointer_pos(event.position, st.scale);
                 match &event.kind {
                     PointerEventKind::Motion { .. } => {
@@ -1939,8 +2027,8 @@ impl PointerHandler for AppState {
                                 let changed = st.fuzzel.mouse_input(
                                     clear_ui::widget::MouseButton::Left,
                                     clear_ui::widget::ElementState::Pressed,
-                                    st.cursor_x,
-                                    st.cursor_y,
+                                    event.position.0 as f32,
+                                    event.position.1 as f32,
                                 );
                                 if changed {
                                     if st.fuzzel.selected == prev_selected {
@@ -2225,6 +2313,7 @@ impl AppState {
                     Key::Named(NamedKey::Backspace) => {
                         st.fuzzel.query.pop();
                         st.fuzzel.filter();
+                        st.update_desired_size();
                         st.upload_vertices();
                         self.redraw = true;
                     }
@@ -2234,6 +2323,7 @@ impl AppState {
                                 st.fuzzel.query.push(ch);
                             }
                             st.fuzzel.filter();
+                            st.update_desired_size();
                             st.upload_vertices();
                             self.redraw = true;
                         } else {
@@ -2260,6 +2350,9 @@ fn main() {
         LauncherMode::Path
     };
     let mut initial_hex: Option<String> = None;
+    let mut x_pos: Option<i32> = None;
+    let mut y_pos: Option<i32> = None;
+    let mut select_item: Option<String> = None;
 
     let args = std::env::args().skip(1).collect::<Vec<String>>();
     let mut i = 0;
@@ -2268,6 +2361,31 @@ fn main() {
         if arg == "-p" || arg == "--prompt" {
             if i + 1 < args.len() {
                 prompt = args[i + 1].clone();
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if arg == "-s" || arg == "--select" {
+            if i + 1 < args.len() {
+                select_item = Some(args[i + 1].clone());
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if arg == "-x" || arg == "--x-pos" {
+            if i + 1 < args.len() {
+                if let Ok(val) = args[i + 1].parse::<i32>() {
+                    x_pos = Some(val);
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if arg == "-y" || arg == "--y-pos" {
+            if i + 1 < args.len() {
+                if let Ok(val) = args[i + 1].parse::<i32>() {
+                    y_pos = Some(val);
+                }
                 i += 2;
             } else {
                 i += 1;
@@ -2368,7 +2486,10 @@ fn main() {
         stdin_sender,
         mode,
         initial_hex,
+        x_pos,
+        y_pos,
         scale,
+        select_item,
     ));
 
     app.window = Some(state.window.clone());
@@ -2384,6 +2505,7 @@ fn main() {
         if let calloop::channel::Event::Msg(()) = event {
             if let Some(st) = &mut app_state.state {
                 if st.check_stdin_updates() {
+                    st.update_desired_size();
                     st.apply_layout();
                     st.upload_vertices();
                     app_state.redraw = true;
