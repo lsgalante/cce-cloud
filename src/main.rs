@@ -1175,6 +1175,31 @@ struct StdinState {
     new_data: bool,
 }
 
+fn read_opacity_if_configured() -> f32 {
+    let config_path = "/home/lsgalante/.config/ccec/config.toml";
+    let content = std::fs::read_to_string(config_path).unwrap_or_default();
+    
+    let mut in_section = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[transparency]" {
+            in_section = true;
+            continue;
+        }
+        if trimmed.starts_with('[') && in_section {
+            break;
+        }
+        if in_section && trimmed.starts_with("opacity") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                if let Ok(o) = val.trim().parse::<f32>() {
+                    return o.clamp(0.0, 1.0);
+                }
+            }
+        }
+    }
+    0.20 // default opacity for clear-cloud
+}
+
 struct State {
     window: LayerSurface,
     wl_surface: wl_surface::WlSurface,
@@ -1205,6 +1230,8 @@ struct State {
     stdin_state: Arc<Mutex<StdinState>>,
     mode: LauncherMode,
     apps: Vec<AppInfo>,
+    opacity: f32,
+    fade_factor: f32,
 }
 
 impl State {
@@ -1264,7 +1291,7 @@ impl State {
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: wgpu::PowerPreference::LowPower,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
             })
@@ -1415,6 +1442,8 @@ impl State {
             None
         };
 
+        let opacity = read_opacity_if_configured();
+
         let mut state = Self {
             window,
             wl_surface,
@@ -1442,6 +1471,8 @@ impl State {
             stdin_state,
             mode,
             apps,
+            opacity,
+            fade_factor: 1.0,
         };
 
         state.check_stdin_updates();
@@ -1488,7 +1519,12 @@ impl State {
     }
 
     fn upload_vertices(&mut self) {
-        let verts = self.collect_vertices();
+        let mut verts = self.collect_vertices();
+        if self.fade_factor < 1.0 {
+            for v in &mut verts {
+                v.color[3] *= self.fade_factor;
+            }
+        }
         self.vertex_count = verts.len() as u32;
         if self.vertex_count == 0 {
             return;
@@ -1554,6 +1590,12 @@ impl State {
             let left = if is_color_mode { label.x } else { label.x * scale_f32 };
             let top = if is_color_mode { label.y } else { label.y * scale_f32 };
             let scale = if is_color_mode { 1.0 } else { scale_f32 };
+            let default_color = if self.fade_factor < 1.0 {
+                let alpha = (self.fade_factor * 255.0) as u8;
+                glyphon::Color::rgba(label.color[0], label.color[1], label.color[2], alpha)
+            } else {
+                glyphon::Color::rgb(label.color[0], label.color[1], label.color[2])
+            };
             areas.push(TextArea {
                 buffer: buf,
                 left,
@@ -1565,7 +1607,7 @@ impl State {
                     right: *physical_width as i32,
                     bottom: *physical_height as i32,
                 },
-                default_color: glyphon::Color::rgb(label.color[0], label.color[1], label.color[2]),
+                default_color,
                 custom_glyphs: &[],
             });
         }
@@ -1595,7 +1637,9 @@ impl State {
         }
     }
 
-    fn render(&mut self) -> bool {
+    fn render(&mut self, fade_factor: f32) -> bool {
+        self.fade_factor = fade_factor;
+        self.upload_vertices();
         self.prepare_text();
 
         let output = match self.surface.get_current_texture() {
@@ -1625,7 +1669,7 @@ impl State {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.05, g: 0.05, b: 0.08, a: 0.20,
+                            r: 0.05, g: 0.05, b: 0.08, a: (self.opacity * fade_factor) as f64,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1676,6 +1720,19 @@ struct AppState {
     exit: bool,
     redraw: bool,
     ctrl_pressed: bool,
+    fade_out: bool,
+    fade_start: Option<std::time::Instant>,
+    fade_factor: f32,
+}
+
+impl AppState {
+    fn trigger_close(&mut self) {
+        if !self.fade_out {
+            self.fade_out = true;
+            self.fade_start = Some(std::time::Instant::now());
+            self.redraw = true;
+        }
+    }
 }
 
 impl CompositorHandler for AppState {
@@ -1820,6 +1877,7 @@ impl PointerHandler for AppState {
         events: &[smithay_client_toolkit::seat::pointer::PointerEvent],
     ) {
         use smithay_client_toolkit::seat::pointer::PointerEventKind;
+        let mut should_close = false;
         for event in events {
             if let Some(st) = &mut self.state {
                 let (cx, cy) = clear_ui::wayland::scale_pointer_pos(event.position, st.scale);
@@ -1869,10 +1927,10 @@ impl PointerHandler for AppState {
                                     match action {
                                         ColorAction::Apply => {
                                             println!("{}", hex);
-                                            self.exit = true;
+                                            should_close = true;
                                         }
                                         ColorAction::Cancel => {
-                                            self.exit = true;
+                                            should_close = true;
                                         }
                                     }
                                 }
@@ -1900,7 +1958,7 @@ impl PointerHandler for AppState {
                                                 LauncherMode::Dmenu => {}
                                                 LauncherMode::Color => {}
                                             }
-                                            self.exit = true;
+                                            should_close = true;
                                         }
                                     }
                                     st.upload_vertices();
@@ -1957,6 +2015,9 @@ impl PointerHandler for AppState {
                 }
             }
         }
+        if should_close {
+            self.trigger_close();
+        }
     }
 }
 
@@ -1980,7 +2041,7 @@ impl KeyboardHandler for AppState {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        self.exit = true;
+        self.trigger_close();
     }
 
     fn press_key(
@@ -2102,18 +2163,19 @@ impl AppState {
             }
         };
 
+        let mut should_close = false;
         if let Some(st) = &mut self.state {
             let mut handled = true;
             if st.mode == LauncherMode::Color {
                 match &logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        self.exit = true;
+                        should_close = true;
                     }
                     Key::Named(NamedKey::Enter) => {
                         if let Some(cp) = &st.color_picker {
                             println!("{}", cp.hex());
                         }
-                        self.exit = true;
+                        should_close = true;
                     }
                     _ => {
                         handled = false;
@@ -2122,7 +2184,7 @@ impl AppState {
             } else {
                 match &logical_key {
                     Key::Named(NamedKey::Escape) => {
-                        self.exit = true;
+                        should_close = true;
                     }
                     Key::Named(NamedKey::Enter) => {
                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
@@ -2139,7 +2201,7 @@ impl AppState {
                                 LauncherMode::Dmenu => {}
                                 LauncherMode::Color => {}
                             }
-                            self.exit = true;
+                            should_close = true;
                         }
                     }
                     Key::Named(NamedKey::ArrowDown) => {
@@ -2183,6 +2245,9 @@ impl AppState {
             if handled {
                 self.redraw = true;
             }
+        }
+        if should_close {
+            self.trigger_close();
         }
     }
 }
@@ -2284,6 +2349,9 @@ fn main() {
         exit: false,
         redraw: true,
         ctrl_pressed: false,
+        fade_out: false,
+        fade_start: None,
+        fade_factor: 1.0,
     };
 
     // Perform a roundtrip to populate output_state with active output scales
@@ -2325,6 +2393,18 @@ fn main() {
     }).unwrap();
 
     loop {
+        if app.fade_out {
+            if let Some(start) = app.fade_start {
+                let elapsed = start.elapsed().as_secs_f32();
+                app.fade_factor = (1.0 - elapsed / 0.15).max(0.0);
+                if app.fade_factor <= 0.0 {
+                    app.exit = true;
+                } else {
+                    app.redraw = true;
+                }
+            }
+        }
+
         let timeout = if app.redraw {
             std::time::Duration::from_millis(0)
         } else {
@@ -2339,7 +2419,7 @@ fn main() {
         if app.redraw {
             app.redraw = false;
             if let Some(state) = &mut app.state {
-                if state.render() {
+                if state.render(app.fade_factor) {
                     app.redraw = true;
                 }
             }
