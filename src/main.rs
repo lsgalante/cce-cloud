@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
-use clear_ui::widget::{Widget, TextLabel};
+use clear_ui::widget::{Widget, TextLabel, JsonLayoutWidget, JsonLayoutConfig, JsonWidgetConfig};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -405,7 +405,7 @@ const PREVIEW_Y: f32 = 276.0;
 const PREVIEW_W: f32 = 160.0;
 const PREVIEW_H: f32 = 72.0;
 const BUTTON_Y: f32 = 360.0;
-const BUTTON_H: f32 = 32.0;
+const BUTTON_H: f32 = 24.0;
 const BUTTON_W: f32 = 100.0;
 const BUTTON_GAP: f32 = 12.0;
 const WIN_W: f32 = 380.0;
@@ -1156,227 +1156,7 @@ impl Widget for FuzzelWidget {
     }
 }
 
-#[derive(serde::Deserialize, Debug, Clone)]
-struct JsonWidgetConfig {
-    #[serde(rename = "type")]
-    widget_type: String,
-    text: String,
-    id: Option<String>,
-    checked: Option<bool>,
-}
 
-#[derive(serde::Deserialize, Debug, Clone)]
-struct JsonLayoutConfig {
-    width: Option<u32>,
-    height: Option<u32>,
-    widgets: Vec<JsonWidgetConfig>,
-}
-
-use clear_ui::widget::WidgetBase;
-
-struct JsonWidget {
-    id: String,
-    _widget_type: String,
-    text: String,
-    checkbox: Option<clear_ui::widget::Checkbox>,
-    button: Option<clear_ui::widget::Button>,
-    label: Option<clear_ui::widget::Label>,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    label_text: Option<clear_ui::widget::TextLabel>,
-}
-
-struct JsonLayoutWidget {
-    base: WidgetBase,
-    widgets: Vec<JsonWidget>,
-}
-
-impl JsonLayoutWidget {
-    fn new(configs: &[JsonWidgetConfig]) -> Self {
-        let mut widgets = Vec::new();
-        for (idx, w_conf) in configs.iter().enumerate() {
-            let id = w_conf.id.clone().unwrap_or_else(|| format!("widget_{}", idx));
-            let widget_type = w_conf.widget_type.clone();
-            let text = w_conf.text.clone();
-            let mut checkbox = None;
-            let mut button = None;
-            let mut label = None;
-
-            match widget_type.as_str() {
-                "checkbox" => {
-                    let mut cb = clear_ui::widget::Checkbox::new();
-                    if let Some(ch) = w_conf.checked {
-                        cb.set_checked(ch);
-                    }
-                    checkbox = Some(cb);
-                }
-                "button" => {
-                    button = Some(clear_ui::widget::Button::new(0.0, 0.0, 0.0, 0.0).with_label(&text));
-                }
-                "label" => {
-                    label = Some(clear_ui::widget::Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]));
-                }
-                _ => {}
-            }
-
-            widgets.push(JsonWidget {
-                id,
-                _widget_type: widget_type,
-                text,
-                checkbox,
-                button,
-                label,
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-                label_text: None,
-            });
-        }
-
-        Self {
-            base: WidgetBase::new(),
-            widgets,
-        }
-    }
-
-    fn layout_children(&mut self) {
-        let (bx, by, bw, _bh) = self.rect();
-        let pad_x = 16.0;
-        let spacing = 12.0;
-        let usable_w = bw - 2.0 * pad_x;
-        
-        let mut current_y = 16.0;
-        for w_state in &mut self.widgets {
-            w_state.x = bx + pad_x;
-            w_state.y = by + current_y;
-            w_state.w = usable_w;
-            
-            if let Some(cb) = &mut w_state.checkbox {
-                cb.set_rect(w_state.x, w_state.y + 2.0, 18.0, 18.0);
-                w_state.h = 22.0;
-                w_state.label_text = Some(clear_ui::widget::TextLabel {
-                    text: w_state.text.clone(),
-                    x: w_state.x + 28.0,
-                    y: w_state.y + 2.0,
-                    font_size: 13.0,
-                    color: [0xcc, 0xcc, 0xd4],
-                });
-            } else if let Some(btn) = &mut w_state.button {
-                btn.set_rect(w_state.x, w_state.y, usable_w, 32.0);
-                w_state.h = 32.0;
-            } else if let Some(lbl) = &mut w_state.label {
-                lbl.set_rect(w_state.x, w_state.y, usable_w, 18.0);
-                w_state.h = 18.0;
-            }
-            current_y += w_state.h + spacing;
-        }
-    }
-}
-
-impl Widget for JsonLayoutWidget {
-    fn base(&self) -> Option<&WidgetBase> { Some(&self.base) }
-    fn base_mut(&mut self) -> Option<&mut WidgetBase> { Some(&mut self.base) }
-    fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] }
-
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        if let Some(b) = self.base_mut() {
-            b.x = x;
-            b.y = y;
-            b.w = w;
-            b.h = h;
-        }
-        self.layout_children();
-    }
-
-    fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
-        let mut quads = Vec::new();
-        for w in &self.widgets {
-            if let Some(cb) = &w.checkbox {
-                quads.push((cb.rect().0, cb.rect().1, cb.rect().2, cb.rect().3, cb.color()));
-                quads.extend(cb.extra_quads());
-                if let Some(hq) = cb.highlight_quad() {
-                    quads.push(hq);
-                }
-            } else if let Some(btn) = &w.button {
-                quads.push((btn.rect().0, btn.rect().1, btn.rect().2, btn.rect().3, btn.color()));
-                quads.extend(btn.extra_quads());
-                if let Some(hq) = btn.highlight_quad() {
-                    quads.push(hq);
-                }
-            } else if let Some(lbl) = &w.label {
-                quads.push((lbl.rect().0, lbl.rect().1, lbl.rect().2, lbl.rect().3, lbl.color()));
-                quads.extend(lbl.extra_quads());
-            }
-        }
-        quads
-    }
-
-    fn text_labels(&self) -> Vec<clear_ui::widget::TextLabel> {
-        let mut labels = Vec::new();
-        for w in &self.widgets {
-            if let Some(_cb) = &w.checkbox {
-                if let Some(tl) = &w.label_text {
-                    labels.push(tl.clone());
-                }
-            } else if let Some(btn) = &w.button {
-                labels.extend(btn.text_labels());
-            } else if let Some(lbl) = &w.label {
-                labels.extend(lbl.text_labels());
-            }
-        }
-        labels
-    }
-
-    fn on_cursor_moved(&mut self, px: f32, py: f32) -> bool {
-        let mut changed = false;
-        for w in &mut self.widgets {
-            if let Some(cb) = &mut w.checkbox {
-                let was = cb.hovered();
-                let hit = px >= w.x && px <= w.x + w.w && py >= w.y && py <= w.y + w.h;
-                cb.set_hovered(hit);
-                if was != hit {
-                    changed = true;
-                }
-            } else if let Some(btn) = &mut w.button {
-                if btn.cursor_moved(px, py) {
-                    changed = true;
-                }
-            } else if let Some(lbl) = &mut w.label {
-                if lbl.cursor_moved(px, py) {
-                    changed = true;
-                }
-            }
-        }
-        changed
-    }
-
-    fn mouse_input(&mut self, button: clear_ui::widget::MouseButton, state: clear_ui::widget::ElementState, px: f32, py: f32) -> bool {
-        if button != clear_ui::widget::MouseButton::Left { return false; }
-        let mut changed = false;
-        for w in &mut self.widgets {
-            if let Some(cb) = &mut w.checkbox {
-                let hit = px >= w.x && px <= w.x + w.w && py >= w.y && py <= w.y + w.h;
-                if hit {
-                    if state == clear_ui::widget::ElementState::Pressed {
-                        changed = true;
-                    } else if state == clear_ui::widget::ElementState::Released {
-                        let new_checked = !cb.checked();
-                        cb.set_checked(new_checked);
-                        changed = true;
-                    }
-                }
-            } else if let Some(btn) = &mut w.button {
-                if btn.mouse_input(button, state, px, py) {
-                    changed = true;
-                }
-            }
-        }
-        changed
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LauncherMode {
@@ -1459,6 +1239,7 @@ struct State {
     max_width: u32,
     max_height: u32,
     select_item: Option<String>,
+    last_tick: std::time::Instant,
 }
 
 impl State {
@@ -1484,14 +1265,38 @@ impl State {
                 let w = config.width.unwrap_or(300);
                 let h = config.height.unwrap_or_else(|| {
                     let mut current_y = 16.0f32;
-                    for w_conf in &config.widgets {
-                        let h = match w_conf.widget_type.as_str() {
-                            "label" => 18.0,
-                            "checkbox" => 22.0,
-                            "button" => 32.0,
-                            _ => 20.0,
-                        };
-                        current_y += h + 12.0;
+                    if let Some(ref widgets) = config.widgets {
+                        for w_conf in widgets {
+                            let h = match w_conf.widget_type.as_str() {
+                                "label" => 18.0,
+                                "checkbox" => 22.0,
+                                "button" => 24.0,
+                                "spinbox" => 22.0,
+                                "color" => 24.0,
+                                _ => 20.0,
+                            };
+                            current_y += h + 12.0;
+                        }
+                    } else if let Some(ref pages) = config.pages {
+                        let mut max_page_y = 16.0f32;
+                        for page in pages {
+                            let mut page_y = 16.0f32;
+                            for w_conf in &page.widgets {
+                                let h = match w_conf.widget_type.as_str() {
+                                    "label" => 18.0,
+                                    "checkbox" => 22.0,
+                                    "button" => 24.0,
+                                    "spinbox" => 22.0,
+                                    "color" => 24.0,
+                                    _ => 20.0,
+                                };
+                                page_y += h + 12.0;
+                            }
+                            if page_y > max_page_y {
+                                max_page_y = page_y;
+                            }
+                        }
+                        current_y = max_page_y;
                     }
                     current_y += 4.0;
                     current_y.round() as u32
@@ -1703,7 +1508,7 @@ impl State {
 
         let json_layout = if mode == LauncherMode::Json {
             if let Some(ref config) = json_layout_config {
-                let mut jl = JsonLayoutWidget::new(&config.widgets);
+                let mut jl = JsonLayoutWidget::new(config);
                 jl.set_rect(0.0, 0.0, lw, lh);
                 Some(jl)
             } else {
@@ -1748,6 +1553,7 @@ impl State {
             max_width: width,
             max_height: height,
             select_item,
+            last_tick: std::time::Instant::now(),
         };
 
         state.check_stdin_updates();
@@ -2010,6 +1816,9 @@ impl State {
     }
 
     fn render(&mut self, fade_factor: f32) -> bool {
+        let now = std::time::Instant::now();
+        self.last_tick = now;
+
         self.fade_factor = fade_factor;
         self.upload_vertices();
         self.prepare_text();
@@ -2410,16 +2219,28 @@ impl PointerHandler for AppState {
                                 }
                                 if let Some(btn_id) = clicked_btn_id {
                                     let mut checkboxes = std::collections::HashMap::new();
+                                    let mut spinboxes = std::collections::HashMap::new();
+                                    let mut colors = std::collections::HashMap::new();
+                                    let mut sliders = std::collections::HashMap::new();
                                     if let Some(jl) = &st.json_layout {
                                         for w in &jl.widgets {
                                             if let Some(cb) = &w.checkbox {
                                                 checkboxes.insert(w.id.clone(), cb.checked());
+                                            } else if let Some(sb) = &w.spinbox {
+                                                spinboxes.insert(w.id.clone(), sb.value);
+                                            } else if let Some(cs) = &w.color_selector {
+                                                colors.insert(w.id.clone(), cs.color);
+                                            } else if let Some(sl) = &w.slider {
+                                                sliders.insert(w.id.clone(), sl.get_scaled_value());
                                             }
                                         }
                                     }
                                     let out_val = serde_json::json!({
                                         "button": btn_id,
-                                        "checkboxes": checkboxes
+                                        "checkboxes": checkboxes,
+                                        "spinboxes": spinboxes,
+                                        "colors": colors,
+                                        "sliders": sliders
                                     });
                                     println!("{}", out_val.to_string());
                                     should_close = true;
@@ -2624,12 +2445,30 @@ impl AppState {
                     }
                 }
             } else if st.mode == LauncherMode::Json {
-                match &logical_key {
-                    Key::Named(NamedKey::Escape) => {
-                        should_close = true;
+                let mut widget_handled = false;
+                let key_event = clear_ui::widget::KeyEvent {
+                    state,
+                    logical_key: logical_key.clone(),
+                    text: event.utf8.clone(),
+                    repeat: false,
+                    ctrl: self.ctrl_pressed,
+                    shift: false,
+                };
+                if let Some(jl) = &mut st.json_layout {
+                    if jl.keyboard_input(&key_event) {
+                        widget_handled = true;
+                        st.upload_vertices();
+                        self.redraw = true;
                     }
-                    _ => {
-                        handled = false;
+                }
+                if !widget_handled {
+                    match &logical_key {
+                        Key::Named(NamedKey::Escape) => {
+                            should_close = true;
+                        }
+                        _ => {
+                            handled = false;
+                        }
                     }
                 }
             } else {
@@ -2906,6 +2745,7 @@ fn main() {
         }
     }).unwrap();
 
+    let mut last_tick = std::time::Instant::now();
     loop {
         if app.fade_out {
             if let Some(start) = app.fade_start {
@@ -2930,12 +2770,24 @@ fn main() {
             break;
         }
 
+        let now = std::time::Instant::now();
+        let mut dt = now.duration_since(last_tick).as_secs_f32();
+        last_tick = now;
+        if dt > 0.1 {
+            dt = 0.1;
+        }
+        if let Some(state) = &mut app.state {
+            if let Some(jl) = &mut state.json_layout {
+                if jl.tick(dt) {
+                    app.redraw = true;
+                }
+            }
+        }
+
         if app.redraw {
             app.redraw = false;
             if let Some(state) = &mut app.state {
-                if state.render(app.fade_factor) {
-                    app.redraw = true;
-                }
+                let _ = state.render(app.fade_factor);
             }
         }
     }
@@ -2967,14 +2819,15 @@ mod tests {
         let config: JsonLayoutConfig = serde_json::from_str(json_str).expect("Failed to parse JSON");
         assert_eq!(config.width, Some(320));
         assert_eq!(config.height, Some(240));
-        assert_eq!(config.widgets.len(), 3);
+        let widgets = config.widgets.as_ref().expect("widgets option should be Some");
+        assert_eq!(widgets.len(), 3);
 
-        assert_eq!(config.widgets[0].widget_type, "label");
-        assert_eq!(config.widgets[0].text, "Select Option:");
+        assert_eq!(widgets[0].widget_type, "label");
+        assert_eq!(widgets[0].text, "Select Option:");
 
-        assert_eq!(config.widgets[1].widget_type, "checkbox");
-        assert_eq!(config.widgets[1].id.as_deref(), Some("feat_a"));
-        assert_eq!(config.widgets[1].checked, Some(true));
+        assert_eq!(widgets[1].widget_type, "checkbox");
+        assert_eq!(widgets[1].id.as_deref(), Some("feat_a"));
+        assert_eq!(widgets[1].checked, Some(true));
     }
 
     #[test]
@@ -2987,22 +2840,56 @@ mod tests {
                 text: "Label 1".to_string(),
                 id: None,
                 checked: None,
+                value: None,
+                min: None,
+                max: None,
+                step: None,
+                decimals: None,
+                color: None,
+                value_f32: None,
+                min_f32: None,
+                max_f32: None,
             },
             JsonWidgetConfig {
                 widget_type: "checkbox".to_string(),
                 text: "Check 1".to_string(),
                 id: Some("chk".to_string()),
                 checked: Some(false),
+                value: None,
+                min: None,
+                max: None,
+                step: None,
+                decimals: None,
+                color: None,
+                value_f32: None,
+                min_f32: None,
+                max_f32: None,
             },
             JsonWidgetConfig {
                 widget_type: "button".to_string(),
                 text: "Click 1".to_string(),
                 id: Some("btn".to_string()),
                 checked: None,
+                value: None,
+                min: None,
+                max: None,
+                step: None,
+                decimals: None,
+                color: None,
+                value_f32: None,
+                min_f32: None,
+                max_f32: None,
             },
         ];
 
-        let mut layout = JsonLayoutWidget::new(&widgets_conf);
+        let config = JsonLayoutConfig {
+            width: Some(300),
+            height: Some(400),
+            widgets: Some(widgets_conf),
+            pages: None,
+        };
+
+        let mut layout = JsonLayoutWidget::new(&config);
         layout.set_rect(0.0, 0.0, 300.0, 400.0);
 
         // Verify sub-widgets are populated and positioned correctly
@@ -3035,7 +2922,7 @@ mod tests {
         assert_eq!(w_check_h, 22.0);
 
         assert_eq!(w_btn_y, w_check_y + 22.0 + 12.0);
-        assert_eq!(w_btn_h, 32.0);
+        assert_eq!(w_btn_h, 24.0);
 
         // Check horizontal positioning (should match usable width: 300 - 2 * 16 = 268)
         assert_eq!(w_label_x, 16.0);
