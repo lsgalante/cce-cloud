@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
-use clear_ui::widget::{Widget, TextLabel, JsonLayoutWidget, JsonLayoutConfig, JsonWidgetConfig};
+use clear_ui::widget::{Element, TextLabel, JsonLayoutWidget, JsonLayoutConfig, JsonWidgetConfig};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -78,7 +78,7 @@ fn quad_vertices(
     ]
 }
 
-fn widget_vertices(w: &dyn Widget, sw: f32, sh: f32) -> Vec<Vertex> {
+fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
     let (x, y, ww, h) = w.rect();
     let mut verts = quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec();
     for (qx, qy, qw, qh, qc) in w.extra_quads() {
@@ -1090,7 +1090,7 @@ impl FuzzelWidget {
     }
 }
 
-impl Widget for FuzzelWidget {
+impl Element for FuzzelWidget {
     fn rect(&self) -> (f32, f32, f32, f32) {
         (self.x, self.y, self.w, self.h)
     }
@@ -2915,7 +2915,7 @@ mod tests {
 
     #[test]
     fn test_json_layout_widget_flow() {
-        use clear_ui::widget::Widget;
+        use clear_ui::widget::Element;
 
         let widgets_conf = vec![
             JsonWidgetConfig {
