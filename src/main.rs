@@ -39,12 +39,14 @@ use glyphon::{
 pub(crate) struct Vertex {
     position: [f32; 2],
     color: [f32; 4],
+    clip_circle: [f32; 3],
 }
 
 impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
         0 => Float32x2,
         1 => Float32x4,
+        2 => Float32x3,
     ];
 
     fn desc() -> wgpu::VertexBufferLayout<'static> {
@@ -67,12 +69,12 @@ fn quad_vertices(
     let y1 = 1.0 - ((y + h) / surface_h) * 2.0;
 
     [
-        Vertex { position: [x0, y0], color },
-        Vertex { position: [x1, y0], color },
-        Vertex { position: [x0, y1], color },
-        Vertex { position: [x1, y0], color },
-        Vertex { position: [x1, y1], color },
-        Vertex { position: [x0, y1], color },
+        Vertex { position: [x0, y0], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y1], color, clip_circle: [0.0; 3] },
+        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
     ]
 }
 
@@ -291,6 +293,82 @@ fn scan_apps() -> Vec<AppInfo> {
     apps
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+struct AppLaunchHistory {
+    count: u32,
+    last_launch: u64,
+}
+
+fn get_cache_path() -> Option<std::path::PathBuf> {
+    let cache_dir = if let Ok(cache_home) = std::env::var("XDG_CACHE_HOME") {
+        std::path::PathBuf::from(cache_home)
+    } else if let Ok(home) = std::env::var("HOME") {
+        std::path::PathBuf::from(home).join(".cache")
+    } else {
+        return None;
+    };
+    Some(cache_dir.join("clear-cloud-apps.json"))
+}
+
+fn load_history() -> std::collections::HashMap<String, AppLaunchHistory> {
+    if let Some(path) = get_cache_path() {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(history) = serde_json::from_str(&content) {
+                return history;
+            }
+        }
+    }
+    std::collections::HashMap::new()
+}
+
+fn save_history(history: &std::collections::HashMap<String, AppLaunchHistory>) {
+    if let Some(path) = get_cache_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Ok(serialized) = serde_json::to_string_pretty(history) {
+            let _ = std::fs::write(path, serialized);
+        }
+    }
+}
+
+fn record_app_launch(app_name: &str) {
+    let mut history = load_history();
+    let entry = history.entry(app_name.to_string()).or_default();
+    entry.count += 1;
+    entry.last_launch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    save_history(&history);
+}
+
+fn sort_apps_by_history(apps: &mut Vec<AppInfo>) {
+    let history = load_history();
+    apps.sort_by(|a, b| {
+        let hist_a = history.get(&a.name);
+        let hist_b = history.get(&b.name);
+        match (hist_a, hist_b) {
+            (Some(a_val), Some(b_val)) => {
+                let count_cmp = b_val.count.cmp(&a_val.count);
+                if count_cmp != std::cmp::Ordering::Equal {
+                    count_cmp
+                } else {
+                    let time_cmp = b_val.last_launch.cmp(&a_val.last_launch);
+                    if time_cmp != std::cmp::Ordering::Equal {
+                        time_cmp
+                    } else {
+                        a.name.cmp(&b.name)
+                    }
+                }
+            }
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.name.cmp(&b.name),
+        }
+    });
+}
+
 fn spawn_command(cmd: &str) {
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
@@ -322,12 +400,12 @@ fn gradient_quad_vertices(x: f32, y: f32, w: f32, h: f32, sw: f32, sh: f32, c0: 
     let x1 = ((x + w) / sw) * 2.0 - 1.0;
     let y1 = 1.0 - ((y + h) / sh) * 2.0;
     [
-        Vertex { position: [x0, y0], color: c0 },
-        Vertex { position: [x1, y0], color: c1 },
-        Vertex { position: [x0, y1], color: c0 },
-        Vertex { position: [x1, y0], color: c1 },
-        Vertex { position: [x1, y1], color: c1 },
-        Vertex { position: [x0, y1], color: c0 },
+        Vertex { position: [x0, y0], color: c0, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y0], color: c1, clip_circle: [0.0; 3] },
+        Vertex { position: [x0, y1], color: c0, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y0], color: c1, clip_circle: [0.0; 3] },
+        Vertex { position: [x1, y1], color: c1, clip_circle: [0.0; 3] },
+        Vertex { position: [x0, y1], color: c0, clip_circle: [0.0; 3] },
     ]
 }
 
@@ -1258,6 +1336,7 @@ impl State {
         select_item: Option<String>,
         json_layout_config: Option<JsonLayoutConfig>,
     ) -> Self {
+        clear_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Color {
             (WIN_W as u32, WIN_H as u32)
         } else if mode == LauncherMode::Json {
@@ -1481,6 +1560,7 @@ impl State {
             });
         } else if mode == LauncherMode::Apps {
             apps = scan_apps();
+            sort_apps_by_history(&mut apps);
             let app_names: Vec<String> = apps.iter().map(|app| app.name.clone()).collect();
             if let Ok(mut lock_state) = stdin_state.lock() {
                 lock_state.items = app_names;
@@ -1653,6 +1733,7 @@ impl State {
             }
         } else if self.mode == LauncherMode::Json {
             if let Some(jl) = &mut self.json_layout {
+                clear_ui::scale::set_scale_factor(self.scale as f32);
                 jl.set_rect(0.0, 0.0, w, h);
             }
         } else {
@@ -2158,6 +2239,7 @@ impl PointerHandler for AppState {
                                             match st.mode {
                                                 LauncherMode::Apps => {
                                                     if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                                        record_app_launch(&app.name);
                                                         spawn_command(&app.exec);
                                                     }
                                                 }
@@ -2482,6 +2564,7 @@ impl AppState {
                             match st.mode {
                                 LauncherMode::Apps => {
                                     if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                        record_app_launch(&app.name);
                                         spawn_command(&app.exec);
                                     }
                                 }
@@ -2949,5 +3032,68 @@ mod tests {
         let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0);
         assert!(changed_hover);
         assert!(layout.widgets[2].button.as_ref().unwrap().base().unwrap().hovered);
+    }
+
+    #[test]
+    fn test_app_history_sorting() {
+        let temp_dir = std::path::PathBuf::from("/tmp/clear-cloud-test-cache-dir");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let orig_xdg = std::env::var("XDG_CACHE_HOME").ok();
+        std::env::set_var("XDG_CACHE_HOME", &temp_dir);
+
+        let mut apps = vec![
+            AppInfo { name: "App A".to_string(), exec: "exec_a".to_string() },
+            AppInfo { name: "App B".to_string(), exec: "exec_b".to_string() },
+            AppInfo { name: "App C".to_string(), exec: "exec_c".to_string() },
+        ];
+
+        // Initially no history, sorted alphabetically.
+        sort_apps_by_history(&mut apps);
+        assert_eq!(apps[0].name, "App A");
+        assert_eq!(apps[1].name, "App B");
+        assert_eq!(apps[2].name, "App C");
+
+        // Record launch for App B once, and App C twice.
+        record_app_launch("App B");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        record_app_launch("App C");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        record_app_launch("App C");
+
+        sort_apps_by_history(&mut apps);
+        // App C (count 2) -> App B (count 1) -> App A (count 0)
+        assert_eq!(apps[0].name, "App C");
+        assert_eq!(apps[1].name, "App B");
+        assert_eq!(apps[2].name, "App A");
+
+        // Record App A launches 3 times to move it to the top.
+        record_app_launch("App A");
+        record_app_launch("App A");
+        record_app_launch("App A");
+
+        sort_apps_by_history(&mut apps);
+        // App A (count 3) -> App C (count 2) -> App B (count 1)
+        assert_eq!(apps[0].name, "App A");
+        assert_eq!(apps[1].name, "App C");
+        assert_eq!(apps[2].name, "App B");
+
+        // Record App B launch once, now both App B and App C have count 2.
+        // App B was launched most recently, so it should rank higher than App C.
+        record_app_launch("App B");
+        sort_apps_by_history(&mut apps);
+        // App A (count 3) -> App B (count 2, recent) -> App C (count 2, older)
+        assert_eq!(apps[0].name, "App A");
+        assert_eq!(apps[1].name, "App B");
+        assert_eq!(apps[2].name, "App C");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        if let Some(val) = orig_xdg {
+            std::env::set_var("XDG_CACHE_HOME", val);
+        } else {
+            std::env::remove_var("XDG_CACHE_HOME");
+        }
     }
 }
