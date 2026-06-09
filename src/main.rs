@@ -101,16 +101,17 @@ fn filter_and_sort_items(items: &[String], query: &str) -> Vec<String> {
     }
     let query_lower = query.to_lowercase();
     
-    let mut scored: Vec<(i32, &String)> = items
+    let mut scored: Vec<(i32, usize, &String)> = items
         .iter()
-        .filter_map(|item| {
+        .enumerate()
+        .filter_map(|(idx, item)| {
             let item_lower = item.to_lowercase();
             if item_lower == query_lower {
-                Some((100, item))
+                Some((100, idx, item))
             } else if item_lower.starts_with(&query_lower) {
-                Some((80 - (item.len() as i32), item))
+                Some((80, idx, item))
             } else if item_lower.contains(&query_lower) {
-                Some((50 - (item.len() as i32), item))
+                Some((50, idx, item))
             } else {
                 // Character sequence match
                 let mut query_chars = query_lower.chars().peekable();
@@ -122,7 +123,7 @@ fn filter_and_sort_items(items: &[String], query: &str) -> Vec<String> {
                     }
                 }
                 if query_chars.peek().is_none() {
-                    Some((10 - (item.len() as i32), item))
+                    Some((10, idx, item))
                 } else {
                     None
                 }
@@ -130,8 +131,15 @@ fn filter_and_sort_items(items: &[String], query: &str) -> Vec<String> {
         })
         .collect();
         
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
-    scored.into_iter().map(|(_, item)| item.clone()).collect()
+    scored.sort_by(|a, b| {
+        let score_cmp = b.0.cmp(&a.0);
+        if score_cmp != std::cmp::Ordering::Equal {
+            score_cmp
+        } else {
+            a.1.cmp(&b.1)
+        }
+    });
+    scored.into_iter().map(|(_, _, item)| item.clone()).collect()
 }
 
 fn scan_path() -> Vec<String> {
@@ -307,7 +315,7 @@ fn get_cache_path() -> Option<std::path::PathBuf> {
     } else {
         return None;
     };
-    Some(cache_dir.join("clear-cloud-apps.json"))
+    Some(cache_dir.join("cce-cloud-apps.json"))
 }
 
 fn load_history() -> std::collections::HashMap<String, AppLaunchHistory> {
@@ -1218,10 +1226,10 @@ impl Element for FuzzelWidget {
         labels
     }
 
-    fn mouse_input(&mut self, button: clear_ui::widget::MouseButton, state: clear_ui::widget::ElementState, px: f32, py: f32) -> bool {
+    fn mouse_input(&mut self, button: clear_ui::widget::MouseButton, state: clear_ui::widget::ElementState, px: f32, py: f32, ctx: &mut clear_ui::context::UiContext) -> bool {
         if button == clear_ui::widget::MouseButton::Left && state == clear_ui::widget::ElementState::Pressed {
             let item_h = 25.0;
-            if self.scroll_box.hit_test(px, py) {
+            if self.scroll_box.hit_test(px, py, ctx) {
                 let click_virtual_y = py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
                 let clicked_idx = (click_virtual_y / item_h).floor() as usize;
                 if clicked_idx < self.filtered_items.len() {
@@ -1257,7 +1265,7 @@ struct StdinState {
 }
 
 fn read_opacity_if_configured() -> f32 {
-    let config_path = "/home/lsgalante/.config/ccec/config.toml";
+    let config_path = "/home/lsgalante/.config/cce/config.toml";
     let content = std::fs::read_to_string(config_path).unwrap_or_default();
     
     let mut in_section = false;
@@ -1278,7 +1286,7 @@ fn read_opacity_if_configured() -> f32 {
             }
         }
     }
-    0.20 // default opacity for clear-cloud
+    0.20 // default opacity for cce-cloud
 }
 
 struct State {
@@ -1318,6 +1326,7 @@ struct State {
     max_height: u32,
     select_item: Option<String>,
     last_tick: std::time::Instant,
+    ui_context: clear_ui::context::UiContext,
 }
 
 impl State {
@@ -1397,7 +1406,7 @@ impl State {
         let app_id = if mode == LauncherMode::Color {
             "clear-color-interface".to_string()
         } else {
-            "clear-cloud".to_string()
+            "cce-cloud".to_string()
         };
         let window = layer_shell_state.create_layer_surface(
             qh,
@@ -1634,6 +1643,7 @@ impl State {
             max_height: height,
             select_item,
             last_tick: std::time::Instant::now(),
+            ui_context: clear_ui::context::UiContext::new(),
         };
 
         state.check_stdin_updates();
@@ -1648,21 +1658,21 @@ impl State {
             if lock.new_data {
                 lock.new_data = false;
                 let items = lock.items.clone();
-                eprintln!("[clear-cloud debug] check_stdin_updates: items={:?}, select_item={:?}, currently selected={}", items, self.select_item, self.fuzzel.selected);
+                eprintln!("[cce-cloud debug] check_stdin_updates: items={:?}, select_item={:?}, currently selected={}", items, self.select_item, self.fuzzel.selected);
                 self.fuzzel.set_items(items);
                 if let Some(ref select_name) = self.select_item {
                     let select_lower = select_name.to_lowercase();
                     if let Some(idx) = self.fuzzel.filtered_items.iter().position(|item| item.to_lowercase() == select_lower) {
-                        eprintln!("[clear-cloud debug] Found match for select_item {:?} at index {}, setting selected", select_name, idx);
+                        eprintln!("[cce-cloud debug] Found match for select_item {:?} at index {}, setting selected", select_name, idx);
                         self.fuzzel.selected = idx;
                         self.fuzzel.update_scroll();
                         self.fuzzel.snap_to_selected();
                         self.select_item = None;
                     } else {
-                        eprintln!("[clear-cloud debug] No match found for select_item {:?} in filtered_items {:?}", select_name, self.fuzzel.filtered_items);
+                        eprintln!("[cce-cloud debug] No match found for select_item {:?} in filtered_items {:?}", select_name, self.fuzzel.filtered_items);
                     }
                 }
-                eprintln!("[clear-cloud debug] check_stdin_updates done: selected={}", self.fuzzel.selected);
+                eprintln!("[cce-cloud debug] check_stdin_updates done: selected={}", self.fuzzel.selected);
                 return true;
             }
         }
@@ -1846,8 +1856,8 @@ impl State {
         }
 
         for (buf, label) in widget_buffers.iter().zip(widget_labels.iter()) {
-            let left = if is_color_mode { label.x } else { label.x * scale_f32 };
-            let top = if is_color_mode { label.y } else { label.y * scale_f32 };
+            let left = if is_color_mode { label.x.round() } else { (label.x * scale_f32).round() };
+            let top = if is_color_mode { label.y.round() } else { (label.y * scale_f32).round() };
             let scale = if is_color_mode { 1.0 } else { scale_f32 };
             let default_color = if self.fade_factor < 1.0 {
                 let alpha = (self.fade_factor * 255.0) as u8;
@@ -2142,7 +2152,7 @@ impl PointerHandler for AppState {
         let mut should_close = false;
         for event in events {
             if let Some(st) = &mut self.state {
-                eprintln!("[clear-cloud pointer] Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
+                eprintln!("[cce-cloud pointer] Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
                 let (cx, cy) = clear_ui::wayland::scale_pointer_pos(event.position, st.scale);
                 match &event.kind {
                     PointerEventKind::Motion { .. } => {
@@ -2164,7 +2174,7 @@ impl PointerHandler for AppState {
                         } else if st.mode == LauncherMode::Json {
                             let mut changed = false;
                             if let Some(jl) = &mut st.json_layout {
-                                if jl.on_cursor_moved(event.position.0 as f32, event.position.1 as f32) {
+                                if jl.on_cursor_moved(event.position.0 as f32, event.position.1 as f32, &mut st.ui_context) {
                                     changed = true;
                                 }
                             }
@@ -2216,6 +2226,7 @@ impl PointerHandler for AppState {
                                         clear_ui::widget::ElementState::Pressed,
                                         event.position.0 as f32,
                                         event.position.1 as f32,
+                                        &mut st.ui_context,
                                     ) {
                                         changed = true;
                                     }
@@ -2231,6 +2242,7 @@ impl PointerHandler for AppState {
                                     clear_ui::widget::ElementState::Pressed,
                                     event.position.0 as f32,
                                     event.position.1 as f32,
+                                    &mut st.ui_context,
                                 );
                                 if changed {
                                     if st.fuzzel.selected == prev_selected {
@@ -2283,11 +2295,12 @@ impl PointerHandler for AppState {
                                         clear_ui::widget::ElementState::Released,
                                         event.position.0 as f32,
                                         event.position.1 as f32,
+                                        &mut st.ui_context,
                                     ) {
                                         changed = true;
                                     }
                                     for w in &mut jl.widgets {
-                                        if let Some(btn) = &mut w.button {
+                                        if let Some(btn) = w.widget.as_any_mut().downcast_mut::<clear_ui::widget::Button>() {
                                             if btn.take_click() {
                                                 clicked_btn_id = Some(w.id.clone());
                                                 break;
@@ -2306,13 +2319,13 @@ impl PointerHandler for AppState {
                                     let mut sliders = std::collections::HashMap::new();
                                     if let Some(jl) = &st.json_layout {
                                         for w in &jl.widgets {
-                                            if let Some(cb) = &w.checkbox {
+                                            if let Some(cb) = w.widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>() {
                                                 checkboxes.insert(w.id.clone(), cb.checked());
-                                            } else if let Some(sb) = &w.spinbox {
+                                            } else if let Some(sb) = w.widget.as_any().downcast_ref::<clear_ui::widget::Spinbox>() {
                                                 spinboxes.insert(w.id.clone(), sb.value);
-                                            } else if let Some(cs) = &w.color_selector {
+                                            } else if let Some(cs) = w.widget.as_any().downcast_ref::<clear_ui::widget::ColorSelector>() {
                                                 colors.insert(w.id.clone(), cs.color);
-                                            } else if let Some(sl) = &w.slider {
+                                            } else if let Some(sl) = w.widget.as_any().downcast_ref::<clear_ui::widget::Slider>() {
                                                 sliders.insert(w.id.clone(), sl.get_scaled_value());
                                             }
                                         }
@@ -2349,7 +2362,7 @@ impl PointerHandler for AppState {
                             let h_scroll = horizontal.absolute as f32;
                             let v_scroll = vertical.absolute as f32;
                             let delta = clear_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
-                            if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y) {
+                             if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y, &mut st.ui_context) {
                                 st.fuzzel.update_scroll();
                                 st.upload_vertices();
                                 self.redraw = true;
@@ -2537,7 +2550,7 @@ impl AppState {
                     shift: false,
                 };
                 if let Some(jl) = &mut st.json_layout {
-                    if jl.keyboard_input(&key_event) {
+                    if jl.keyboard_input(&key_event, &mut st.ui_context) {
                         widget_handled = true;
                         st.upload_vertices();
                         self.redraw = true;
@@ -2861,7 +2874,7 @@ fn main() {
         }
         if let Some(state) = &mut app.state {
             if let Some(jl) = &mut state.json_layout {
-                if jl.tick(dt) {
+                if jl.tick(dt, &mut state.ui_context) {
                     app.redraw = true;
                 }
             }
@@ -2974,6 +2987,7 @@ mod tests {
 
         let mut layout = JsonLayoutWidget::new(&config);
         layout.set_rect(0.0, 0.0, 300.0, 400.0);
+        let mut ctx = clear_ui::context::UiContext::new();
 
         // Verify sub-widgets are populated and positioned correctly
         assert_eq!(layout.widgets.len(), 3);
@@ -2993,9 +3007,9 @@ mod tests {
         let w_btn_x = layout.widgets[2].x;
         let w_btn_w = layout.widgets[2].w;
 
-        assert!(layout.widgets[0].label.is_some());
-        assert!(layout.widgets[1].checkbox.is_some());
-        assert!(layout.widgets[2].button.is_some());
+        assert!(layout.widgets[0].widget.as_any().downcast_ref::<clear_ui::widget::Label>().is_some());
+        assert!(layout.widgets[1].widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>().is_some());
+        assert!(layout.widgets[2].widget.as_any().downcast_ref::<clear_ui::widget::Button>().is_some());
 
         // Check vertical sequence positions
         assert_eq!(w_label_y, 16.0);
@@ -3016,7 +3030,7 @@ mod tests {
         assert_eq!(w_btn_w, 268.0);
 
         // Verify Checkbox initial state
-        assert_eq!(layout.widgets[1].checkbox.as_ref().unwrap().checked(), false);
+        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>().unwrap().checked(), false);
 
         // Simulate click on Checkbox row
         let changed = layout.mouse_input(
@@ -3024,19 +3038,20 @@ mod tests {
             clear_ui::widget::ElementState::Released,
             w_check_x + 5.0,
             w_check_y + 5.0,
+            &mut ctx,
         );
         assert!(changed);
-        assert_eq!(layout.widgets[1].checkbox.as_ref().unwrap().checked(), true);
+        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>().unwrap().checked(), true);
 
         // Simulate hover on button
-        let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0);
+        let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0, &mut ctx);
         assert!(changed_hover);
-        assert!(layout.widgets[2].button.as_ref().unwrap().base().unwrap().hovered);
+        assert!(layout.widgets[2].widget.as_any().downcast_ref::<clear_ui::widget::Button>().unwrap().base().unwrap().hovered);
     }
 
     #[test]
     fn test_app_history_sorting() {
-        let temp_dir = std::path::PathBuf::from("/tmp/clear-cloud-test-cache-dir");
+        let temp_dir = std::path::PathBuf::from("/tmp/cce-cloud-test-cache-dir");
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
 
@@ -3096,4 +3111,25 @@ mod tests {
             std::env::remove_var("XDG_CACHE_HOME");
         }
     }
+
+    #[test]
+    fn test_filter_and_sort_preserving_history() {
+        let items = vec![
+            "Firefox".to_string(),
+            "File Manager".to_string(),
+            "foo".to_string(),
+        ];
+
+        let filtered = filter_and_sort_items(&items, "f");
+        assert_eq!(filtered.len(), 3);
+        assert_eq!(filtered[0], "Firefox");
+        assert_eq!(filtered[1], "File Manager");
+        assert_eq!(filtered[2], "foo");
+
+        let filtered_fi = filter_and_sort_items(&items, "fi");
+        assert_eq!(filtered_fi.len(), 2);
+        assert_eq!(filtered_fi[0], "Firefox");
+        assert_eq!(filtered_fi[1], "File Manager");
+    }
 }
+
