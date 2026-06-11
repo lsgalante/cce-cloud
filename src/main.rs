@@ -2692,43 +2692,31 @@ fn main() {
         } else if arg == "--mode" {
             if i + 1 < args.len() {
                 let m = &args[i + 1];
-                if io::stdin().is_terminal() {
-                    match m.as_str() {
-                        "apps" | "app" => mode = LauncherMode::Apps,
-                        "path" => mode = LauncherMode::Path,
-                        "dmenu" => mode = LauncherMode::Dmenu,
-                        "color" => mode = LauncherMode::Color,
-                        _ => eprintln!("Unknown mode: {}", m),
-                    }
+                match m.as_str() {
+                    "apps" | "app" => mode = LauncherMode::Apps,
+                    "path" => mode = LauncherMode::Path,
+                    "dmenu" => mode = LauncherMode::Dmenu,
+                    "color" => mode = LauncherMode::Color,
+                    _ => eprintln!("Unknown mode: {}", m),
                 }
                 i += 2;
             } else {
                 i += 1;
             }
         } else if arg == "--apps" || arg == "--app" {
-            if io::stdin().is_terminal() {
-                mode = LauncherMode::Apps;
-            }
+            mode = LauncherMode::Apps;
             i += 1;
         } else if arg == "--path" {
-            if io::stdin().is_terminal() {
-                mode = LauncherMode::Path;
-            }
+            mode = LauncherMode::Path;
             i += 1;
         } else if arg == "--dmenu" {
-            if io::stdin().is_terminal() {
-                mode = LauncherMode::Dmenu;
-            }
+            mode = LauncherMode::Dmenu;
             i += 1;
         } else if arg == "--color" {
-            if io::stdin().is_terminal() {
-                mode = LauncherMode::Color;
-                if i + 1 < args.len() && !args[i + 1].starts_with('-') {
-                    initial_hex = Some(args[i + 1].clone());
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+            mode = LauncherMode::Color;
+            if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                initial_hex = Some(args[i + 1].clone());
+                i += 2;
             } else {
                 i += 1;
             }
