@@ -1341,6 +1341,7 @@ impl State {
         initial_hex: Option<String>,
         x_pos: Option<i32>,
         y_pos: Option<i32>,
+        align_right: bool,
         scale: f64,
         select_item: Option<String>,
         json_layout_config: Option<JsonLayoutConfig>,
@@ -1420,8 +1421,13 @@ impl State {
         if x_pos.is_some() || y_pos.is_some() {
             let x = x_pos.unwrap_or(0);
             let y = y_pos.unwrap_or(0);
-            window.set_anchor(Anchor::TOP | Anchor::LEFT);
-            window.set_margin(y, 0, 0, x);
+            if align_right {
+                window.set_anchor(Anchor::TOP | Anchor::RIGHT);
+                window.set_margin(y, x, 0, 0);
+            } else {
+                window.set_anchor(Anchor::TOP | Anchor::LEFT);
+                window.set_margin(y, 0, 0, x);
+            }
         } else {
             window.set_anchor(Anchor::empty());
         }
@@ -2652,6 +2658,7 @@ fn main() {
     let mut x_pos: Option<i32> = None;
     let mut y_pos: Option<i32> = None;
     let mut select_item: Option<String> = None;
+    let mut align_right = false;
 
     let args = std::env::args().skip(1).collect::<Vec<String>>();
     let mut i = 0;
@@ -2722,6 +2729,9 @@ fn main() {
             }
         } else if arg == "--json" || arg == "--layout" {
             mode = LauncherMode::Json;
+            i += 1;
+        } else if arg == "--align-right" {
+            align_right = true;
             i += 1;
         } else {
             i += 1;
@@ -2802,6 +2812,7 @@ fn main() {
         initial_hex,
         x_pos,
         y_pos,
+        align_right,
         scale,
         select_item,
         json_layout_config,
