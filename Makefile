@@ -5,7 +5,7 @@ build:
 
 install: build
 	mkdir -p ~/.local/bin
-	install -m 755 target/release/clear-cloud ~/.local/bin/clear-cloud
+	install -m 755 ../target/release/clear-cloud ~/.local/bin/clear-cloud
 
 run:
 	cargo run

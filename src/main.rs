@@ -1417,7 +1417,7 @@ impl State {
             None,
         );
         window.set_size(width, height);
-        window.set_keyboard_interactivity(KeyboardInteractivity::OnDemand);
+        window.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         if x_pos.is_some() || y_pos.is_some() {
             let x = x_pos.unwrap_or(0);
             let y = y_pos.unwrap_or(0);
@@ -2395,7 +2395,9 @@ impl KeyboardHandler for AppState {
         _serial: u32,
         _raw_modifiers: &[u32],
         _keysyms: &[xkeysym::Keysym],
-    ) {}
+    ) {
+        eprintln!("[clear-cloud debug] KeyboardHandler::enter called!");
+    }
 
     fn leave(
         &mut self,
@@ -2405,6 +2407,7 @@ impl KeyboardHandler for AppState {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
+        eprintln!("[clear-cloud debug] KeyboardHandler::leave called!");
         self.trigger_close();
     }
 
@@ -2416,6 +2419,7 @@ impl KeyboardHandler for AppState {
         _serial: u32,
         event: smithay_client_toolkit::seat::keyboard::KeyEvent,
     ) {
+        eprintln!("[clear-cloud debug] press_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
         self.handle_key(event, clear_ui::widget::ElementState::Pressed);
     }
 
@@ -2427,6 +2431,7 @@ impl KeyboardHandler for AppState {
         _serial: u32,
         event: smithay_client_toolkit::seat::keyboard::KeyEvent,
     ) {
+        eprintln!("[clear-cloud debug] release_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
         self.handle_key(event, clear_ui::widget::ElementState::Released);
     }
 
