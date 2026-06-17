@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
-use clear_ui::widget::{Element, TextLabel, JsonLayoutWidget, JsonLayoutConfig, JsonWidgetConfig};
+use cce_ui::widget::{Element, TextLabel, JsonLayoutWidget, JsonLayoutConfig, JsonWidgetConfig};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -381,7 +381,7 @@ fn spawn_command(cmd: &str) {
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/clear-spawn.log")
+        .open("/tmp/cce-spawn.log")
     {
         let mut f = file;
         use std::io::Write;
@@ -579,7 +579,7 @@ impl ColorPickerWidget {
 
         rects.push(RectWidget {
             x: 0.0, y: 0.0, w: sw, h: HEADER_H * s,
-            color: clear_ui::color::HEADER_BG,
+            color: cce_ui::color::HEADER_BG,
         });
         
         labels.push(TextLabel {
@@ -592,7 +592,7 @@ impl ColorPickerWidget {
 
         rects.push(RectWidget {
             x: 0.0, y: HEADER_H * s, w: sw, h: sh - HEADER_H * s,
-            color: clear_ui::color::CONTENT_BG,
+            color: cce_ui::color::CONTENT_BG,
         });
 
         let channels = [self.red, self.green, self.blue, self.hue, self.saturation, self.lightness];
@@ -859,9 +859,9 @@ impl ColorPickerWidget {
         }
     }
 
-    fn handle_mouse_input(&mut self, state: clear_ui::widget::ElementState) {
+    fn handle_mouse_input(&mut self, state: cce_ui::widget::ElementState) {
         match state {
-            clear_ui::widget::ElementState::Pressed => {
+            cce_ui::widget::ElementState::Pressed => {
                 let s = self.scale_factor;
                 let (px, py) = (self.cursor_x, self.cursor_y);
                 for i in 0..6 {
@@ -936,7 +936,7 @@ impl ColorPickerWidget {
                     }
                 }
             }
-            clear_ui::widget::ElementState::Released => {
+            cce_ui::widget::ElementState::Released => {
                 if self.dragging.is_some() {
                     self.dragging = None;
                 }
@@ -1032,7 +1032,7 @@ pub struct FuzzelWidget {
     all_items: Vec<String>,
     filtered_items: Vec<String>,
     selected: usize,
-    pub scroll_box: clear_ui::widget::ScrollBox,
+    pub scroll_box: cce_ui::widget::ScrollBox,
 }
 
 impl FuzzelWidget {
@@ -1047,7 +1047,7 @@ impl FuzzelWidget {
             all_items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
-            scroll_box: clear_ui::widget::ScrollBox::new(),
+            scroll_box: cce_ui::widget::ScrollBox::new(),
         }
     }
 
@@ -1226,8 +1226,8 @@ impl Element for FuzzelWidget {
         labels
     }
 
-    fn mouse_input(&mut self, button: clear_ui::widget::MouseButton, state: clear_ui::widget::ElementState, px: f32, py: f32, ctx: &mut clear_ui::context::UiContext) -> bool {
-        if button == clear_ui::widget::MouseButton::Left && state == clear_ui::widget::ElementState::Pressed {
+    fn mouse_input(&mut self, button: cce_ui::widget::MouseButton, state: cce_ui::widget::ElementState, px: f32, py: f32, ctx: &mut cce_ui::context::UiContext) -> bool {
+        if button == cce_ui::widget::MouseButton::Left && state == cce_ui::widget::ElementState::Pressed {
             let item_h = 25.0;
             if self.scroll_box.hit_test(px, py, ctx) {
                 let click_virtual_y = py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
@@ -1326,7 +1326,7 @@ struct State {
     max_height: u32,
     select_item: Option<String>,
     last_tick: std::time::Instant,
-    ui_context: clear_ui::context::UiContext,
+    ui_context: cce_ui::context::UiContext,
 }
 
 impl State {
@@ -1346,7 +1346,7 @@ impl State {
         select_item: Option<String>,
         json_layout_config: Option<JsonLayoutConfig>,
     ) -> Self {
-        clear_ui::scale::set_scale_factor(scale as f32);
+        cce_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Color {
             (WIN_W as u32, WIN_H as u32)
         } else if mode == LauncherMode::Json {
@@ -1433,7 +1433,7 @@ impl State {
         }
         wl_surface.commit();
 
-        let wayland_handle = Box::leak(Box::new(clear_ui::wayland::WaylandSurfaceHandle {
+        let wayland_handle = Box::leak(Box::new(cce_ui::wayland::WaylandSurfaceHandle {
             display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
             surface_ptr: wl_surface.id().as_ptr() as *mut std::ffi::c_void,
         }));
@@ -1487,7 +1487,7 @@ impl State {
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(clear_ui::SHADER.into()),
+            source: wgpu::ShaderSource::Wgsl(cce_ui::SHADER.into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1649,7 +1649,7 @@ impl State {
             max_height: height,
             select_item,
             last_tick: std::time::Instant::now(),
-            ui_context: clear_ui::context::UiContext::new(),
+            ui_context: cce_ui::context::UiContext::new(),
         };
 
         state.check_stdin_updates();
@@ -1749,7 +1749,7 @@ impl State {
             }
         } else if self.mode == LauncherMode::Json {
             if let Some(jl) = &mut self.json_layout {
-                clear_ui::scale::set_scale_factor(self.scale as f32);
+                cce_ui::scale::set_scale_factor(self.scale as f32);
                 jl.set_rect(0.0, 0.0, w, h);
             }
         } else {
@@ -2159,7 +2159,7 @@ impl PointerHandler for AppState {
         for event in events {
             if let Some(st) = &mut self.state {
                 eprintln!("[cce-cloud pointer] Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
-                let (cx, cy) = clear_ui::wayland::scale_pointer_pos(event.position, st.scale);
+                let (cx, cy) = cce_ui::wayland::scale_pointer_pos(event.position, st.scale);
                 match &event.kind {
                     PointerEventKind::Motion { .. } => {
                         st.cursor_x = cx;
@@ -2199,7 +2199,7 @@ impl PointerHandler for AppState {
                                 let mut action_requested = None;
                                 let mut hex = String::new();
                                 if let Some(cp) = &mut st.color_picker {
-                                    cp.handle_mouse_input(clear_ui::widget::ElementState::Pressed);
+                                    cp.handle_mouse_input(cce_ui::widget::ElementState::Pressed);
                                     if cp.needs_rebuild {
                                         cp.rebuild_layout(st.scale as f32);
                                         needs_rebuild = true;
@@ -2228,8 +2228,8 @@ impl PointerHandler for AppState {
                                 let mut changed = false;
                                 if let Some(jl) = &mut st.json_layout {
                                     if jl.mouse_input(
-                                        clear_ui::widget::MouseButton::Left,
-                                        clear_ui::widget::ElementState::Pressed,
+                                        cce_ui::widget::MouseButton::Left,
+                                        cce_ui::widget::ElementState::Pressed,
                                         event.position.0 as f32,
                                         event.position.1 as f32,
                                         &mut st.ui_context,
@@ -2244,8 +2244,8 @@ impl PointerHandler for AppState {
                             } else {
                                 let prev_selected = st.fuzzel.selected;
                                 let changed = st.fuzzel.mouse_input(
-                                    clear_ui::widget::MouseButton::Left,
-                                    clear_ui::widget::ElementState::Pressed,
+                                    cce_ui::widget::MouseButton::Left,
+                                    cce_ui::widget::ElementState::Pressed,
                                     event.position.0 as f32,
                                     event.position.1 as f32,
                                     &mut st.ui_context,
@@ -2282,7 +2282,7 @@ impl PointerHandler for AppState {
                             if st.mode == LauncherMode::Color {
                                 let mut needs_rebuild = false;
                                 if let Some(cp) = &mut st.color_picker {
-                                    cp.handle_mouse_input(clear_ui::widget::ElementState::Released);
+                                    cp.handle_mouse_input(cce_ui::widget::ElementState::Released);
                                     if cp.needs_rebuild {
                                         cp.rebuild_layout(st.scale as f32);
                                         needs_rebuild = true;
@@ -2297,8 +2297,8 @@ impl PointerHandler for AppState {
                                 let mut clicked_btn_id = None;
                                 if let Some(jl) = &mut st.json_layout {
                                     if jl.mouse_input(
-                                        clear_ui::widget::MouseButton::Left,
-                                        clear_ui::widget::ElementState::Released,
+                                        cce_ui::widget::MouseButton::Left,
+                                        cce_ui::widget::ElementState::Released,
                                         event.position.0 as f32,
                                         event.position.1 as f32,
                                         &mut st.ui_context,
@@ -2306,7 +2306,7 @@ impl PointerHandler for AppState {
                                         changed = true;
                                     }
                                     for w in &mut jl.widgets {
-                                        if let Some(btn) = w.widget.as_any_mut().downcast_mut::<clear_ui::widget::Button>() {
+                                        if let Some(btn) = w.widget.as_any_mut().downcast_mut::<cce_ui::widget::Button>() {
                                             if btn.take_click() {
                                                 clicked_btn_id = Some(w.id.clone());
                                                 break;
@@ -2325,13 +2325,13 @@ impl PointerHandler for AppState {
                                     let mut sliders = std::collections::HashMap::new();
                                     if let Some(jl) = &st.json_layout {
                                         for w in &jl.widgets {
-                                            if let Some(cb) = w.widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>() {
+                                            if let Some(cb) = w.widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>() {
                                                 checkboxes.insert(w.id.clone(), cb.checked());
-                                            } else if let Some(sb) = w.widget.as_any().downcast_ref::<clear_ui::widget::Spinbox>() {
+                                            } else if let Some(sb) = w.widget.as_any().downcast_ref::<cce_ui::widget::Spinbox>() {
                                                 spinboxes.insert(w.id.clone(), sb.value);
-                                            } else if let Some(cs) = w.widget.as_any().downcast_ref::<clear_ui::widget::ColorSelector>() {
+                                            } else if let Some(cs) = w.widget.as_any().downcast_ref::<cce_ui::widget::ColorSelector>() {
                                                 colors.insert(w.id.clone(), cs.color);
-                                            } else if let Some(sl) = w.widget.as_any().downcast_ref::<clear_ui::widget::Slider>() {
+                                            } else if let Some(sl) = w.widget.as_any().downcast_ref::<cce_ui::widget::Slider>() {
                                                 sliders.insert(w.id.clone(), sl.get_scaled_value());
                                             }
                                         }
@@ -2367,7 +2367,7 @@ impl PointerHandler for AppState {
                         } else {
                             let h_scroll = horizontal.absolute as f32;
                             let v_scroll = vertical.absolute as f32;
-                            let delta = clear_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
+                            let delta = cce_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
                              if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y, &mut st.ui_context) {
                                 st.fuzzel.update_scroll();
                                 st.upload_vertices();
@@ -2420,7 +2420,7 @@ impl KeyboardHandler for AppState {
         event: smithay_client_toolkit::seat::keyboard::KeyEvent,
     ) {
         eprintln!("[clear-cloud debug] press_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
-        self.handle_key(event, clear_ui::widget::ElementState::Pressed);
+        self.handle_key(event, cce_ui::widget::ElementState::Pressed);
     }
 
     fn release_key(
@@ -2432,7 +2432,7 @@ impl KeyboardHandler for AppState {
         event: smithay_client_toolkit::seat::keyboard::KeyEvent,
     ) {
         eprintln!("[clear-cloud debug] release_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
-        self.handle_key(event, clear_ui::widget::ElementState::Released);
+        self.handle_key(event, cce_ui::widget::ElementState::Released);
     }
 
     fn update_modifiers(
@@ -2504,9 +2504,9 @@ delegate_registry!(AppState);
 delegate_output!(AppState);
 
 impl AppState {
-    fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: clear_ui::widget::ElementState) {
-        use clear_ui::widget::{Key, NamedKey};
-        if state != clear_ui::widget::ElementState::Pressed {
+    fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: cce_ui::widget::ElementState) {
+        use cce_ui::widget::{Key, NamedKey};
+        if state != cce_ui::widget::ElementState::Pressed {
             return;
         }
 
@@ -2552,7 +2552,7 @@ impl AppState {
                 }
             } else if st.mode == LauncherMode::Json {
                 let mut widget_handled = false;
-                let key_event = clear_ui::widget::KeyEvent {
+                let key_event = cce_ui::widget::KeyEvent {
                     state,
                     logical_key: logical_key.clone(),
                     text: event.utf8.clone(),
@@ -2804,7 +2804,7 @@ fn main() {
     // Perform a roundtrip to populate output_state with active output scales
     event_queue.roundtrip(&mut app).unwrap();
 
-    let scale = clear_ui::wayland::detect_scale_factor(&app.output_state);
+    let scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
 
     let state = pollster::block_on(State::new(
         &conn,
@@ -2932,7 +2932,7 @@ mod tests {
 
     #[test]
     fn test_json_layout_widget_flow() {
-        use clear_ui::widget::Element;
+        use cce_ui::widget::Element;
 
         let widgets_conf = vec![
             JsonWidgetConfig {
@@ -2991,7 +2991,7 @@ mod tests {
 
         let mut layout = JsonLayoutWidget::new(&config);
         layout.set_rect(0.0, 0.0, 300.0, 400.0);
-        let mut ctx = clear_ui::context::UiContext::new();
+        let mut ctx = cce_ui::context::UiContext::new();
 
         // Verify sub-widgets are populated and positioned correctly
         assert_eq!(layout.widgets.len(), 3);
@@ -3011,9 +3011,9 @@ mod tests {
         let w_btn_x = layout.widgets[2].x;
         let w_btn_w = layout.widgets[2].w;
 
-        assert!(layout.widgets[0].widget.as_any().downcast_ref::<clear_ui::widget::Label>().is_some());
-        assert!(layout.widgets[1].widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>().is_some());
-        assert!(layout.widgets[2].widget.as_any().downcast_ref::<clear_ui::widget::Button>().is_some());
+        assert!(layout.widgets[0].widget.as_any().downcast_ref::<cce_ui::widget::Label>().is_some());
+        assert!(layout.widgets[1].widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>().is_some());
+        assert!(layout.widgets[2].widget.as_any().downcast_ref::<cce_ui::widget::Button>().is_some());
 
         // Check vertical sequence positions
         assert_eq!(w_label_y, 16.0);
@@ -3034,23 +3034,23 @@ mod tests {
         assert_eq!(w_btn_w, 268.0);
 
         // Verify Checkbox initial state
-        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>().unwrap().checked(), false);
+        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), false);
 
         // Simulate click on Checkbox row
         let changed = layout.mouse_input(
-            clear_ui::widget::MouseButton::Left,
-            clear_ui::widget::ElementState::Released,
+            cce_ui::widget::MouseButton::Left,
+            cce_ui::widget::ElementState::Released,
             w_check_x + 5.0,
             w_check_y + 5.0,
             &mut ctx,
         );
         assert!(changed);
-        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<clear_ui::widget::Checkbox>().unwrap().checked(), true);
+        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), true);
 
         // Simulate hover on button
         let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0, &mut ctx);
         assert!(changed_hover);
-        assert!(layout.widgets[2].widget.as_any().downcast_ref::<clear_ui::widget::Button>().unwrap().base().unwrap().hovered);
+        assert!(layout.widgets[2].widget.as_any().downcast_ref::<cce_ui::widget::Button>().unwrap().base().unwrap().hovered);
     }
 
     #[test]
