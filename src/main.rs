@@ -647,24 +647,11 @@ struct StdinState {
 }
 
 fn read_opacity_if_configured() -> f32 {
-    let config_path = "/home/lsgalante/.config/cce/config.toml";
-    let content = std::fs::read_to_string(config_path).unwrap_or_default();
-    
-    let mut in_section = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[transparency]" {
-            in_section = true;
-            continue;
-        }
-        if trimmed.starts_with('[') && in_section {
-            break;
-        }
-        if in_section && trimmed.starts_with("opacity") {
-            if let Some(val) = trimmed.split('=').nth(1) {
-                if let Ok(o) = val.trim().parse::<f32>() {
-                    return o.clamp(0.0, 1.0);
-                }
+    let config_path = "/home/lsgalante/.config/cce/config.json";
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(opacity) = val.pointer("/transparency/opacity").and_then(|v| v.as_f64()) {
+                return opacity as f32;
             }
         }
     }
