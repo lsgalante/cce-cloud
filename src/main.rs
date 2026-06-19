@@ -1,7 +1,9 @@
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
-use cce_ui::widget::{Element, TextLabel, JsonLayoutWidget, JsonLayoutConfig, JsonWidgetConfig};
+use cce_ui::widget::{Element, TextLabel, JsonLayoutWidget, JsonLayoutConfig};
+#[cfg(test)]
+use cce_ui::widget::JsonWidgetConfig;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -665,6 +667,7 @@ fn read_opacity_if_configured() -> f32 {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 enum AppWindow {
     Layer(LayerSurface),
     Xdg(XdgWindow),
