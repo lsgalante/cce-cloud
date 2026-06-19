@@ -795,6 +795,7 @@ impl State {
             let xdg_window = xdg_shell.create_window(wl_surface.clone(), WindowDecorations::None, qh);
             xdg_window.set_title("cce-cloud");
             xdg_window.set_app_id(app_id);
+            xdg_window.set_min_size(Some((width, height)));
             if let Some(wm) = cce_wm {
                 let toplevel = wm.get_cce_toplevel(&wl_surface, qh, ());
                 toplevel.set_popup();
