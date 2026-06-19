@@ -719,6 +719,7 @@ impl State {
         compositor_state: &CompositorState,
         layer_shell_state: &LayerShell,
         xdg_shell_state: Option<&XdgShell>,
+        cce_wm: Option<&cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1>,
         use_xdg: bool,
         prompt: String,
         stdin_sender: calloop::channel::Sender<()>,
@@ -729,7 +730,7 @@ impl State {
         scale: f64,
         select_item: Option<String>,
         json_layout_config: Option<JsonLayoutConfig>,
-    ) -> Self {
+    ) -> (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>) {
         cce_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Json {
             if let Some(ref config) = json_layout_config {
@@ -788,11 +789,17 @@ impl State {
         wl_surface.set_buffer_scale(scale as i32);
         let app_id = "cce-cloud".to_string();
 
+        let mut cce_toplevel = None;
         let window = if use_xdg {
             let xdg_shell = xdg_shell_state.expect("XdgShell state is required for XDG mode");
             let xdg_window = xdg_shell.create_window(wl_surface.clone(), WindowDecorations::None, qh);
             xdg_window.set_title("cce-cloud");
             xdg_window.set_app_id(app_id);
+            if let Some(wm) = cce_wm {
+                let toplevel = wm.get_cce_toplevel(&wl_surface, qh, ());
+                toplevel.set_popup();
+                cce_toplevel = Some(toplevel);
+            }
             xdg_window.commit();
             AppWindow::Xdg(xdg_window)
         } else {
@@ -1032,7 +1039,7 @@ impl State {
         state.update_desired_size();
         state.apply_layout();
         state.upload_vertices();
-        state
+        (state, cce_toplevel)
     }
 
     fn check_stdin_updates(&mut self) -> bool {
@@ -2158,12 +2165,13 @@ fn main() {
     let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
     let use_xdg = cce_wm.is_some() && xdg_shell_state.is_some();
 
-    let state = pollster::block_on(State::new(
+    let (state, cce_toplevel) = pollster::block_on(State::new(
         &conn,
         &qh,
         &app.compositor_state,
         &app.layer_shell_state,
         xdg_shell_state.as_ref(),
+        cce_wm.as_ref(),
         use_xdg,
         prompt,
         stdin_sender,
@@ -2178,15 +2186,8 @@ fn main() {
 
     app.window = Some(state.window.clone());
     app.surface = Some(state.wl_surface.clone());
+    app.cce_toplevel = cce_toplevel;
     app.state = Some(state);
-
-    if let Some(ref wm) = cce_wm {
-        if let Some(ref surface) = app.surface {
-            let toplevel = wm.get_cce_toplevel(surface, &qh, ());
-            toplevel.set_popup();
-            app.cce_toplevel = Some(toplevel);
-        }
-    }
 
     let mut event_loop = calloop::EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
