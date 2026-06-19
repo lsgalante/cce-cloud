@@ -7,6 +7,7 @@ use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_pointer, delegate_registry,
     delegate_seat, delegate_shm, delegate_layer, delegate_output,
+    delegate_xdg_shell, delegate_xdg_window,
     registry::{ProvidesRegistryState, RegistryState},
     output::{OutputHandler, OutputState},
     seat::{
@@ -19,6 +20,11 @@ use smithay_client_toolkit::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler,
             LayerSurface, LayerSurfaceConfigure,
         },
+        xdg::{
+            window::{Window as XdgWindow, WindowConfigure, WindowHandler, WindowDecorations},
+            XdgShell,
+        },
+        WaylandSurface,
     },
     shm::{Shm, ShmHandler},
 };
@@ -658,8 +664,14 @@ fn read_opacity_if_configured() -> f32 {
     0.20 // default opacity for cce-cloud
 }
 
+#[derive(Clone)]
+enum AppWindow {
+    Layer(LayerSurface),
+    Xdg(XdgWindow),
+}
+
 struct State {
-    window: LayerSurface,
+    window: AppWindow,
     wl_surface: wl_surface::WlSurface,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -703,6 +715,8 @@ impl State {
         qh: &QueueHandle<AppState>,
         compositor_state: &CompositorState,
         layer_shell_state: &LayerShell,
+        xdg_shell_state: Option<&XdgShell>,
+        use_xdg: bool,
         prompt: String,
         stdin_sender: calloop::channel::Sender<()>,
         mode: LauncherMode,
@@ -770,29 +784,40 @@ impl State {
         let wl_surface = compositor_state.create_surface(qh);
         wl_surface.set_buffer_scale(scale as i32);
         let app_id = "cce-cloud".to_string();
-        let window = layer_shell_state.create_layer_surface(
-            qh,
-            wl_surface.clone(),
-            Layer::Overlay,
-            Some(app_id),
-            None,
-        );
-        window.set_size(width, height);
-        window.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        if x_pos.is_some() || y_pos.is_some() {
-            let x = x_pos.unwrap_or(0);
-            let y = y_pos.unwrap_or(0);
-            if align_right {
-                window.set_anchor(Anchor::TOP | Anchor::RIGHT);
-                window.set_margin(y, x, 0, 0);
-            } else {
-                window.set_anchor(Anchor::TOP | Anchor::LEFT);
-                window.set_margin(y, 0, 0, x);
-            }
+
+        let window = if use_xdg {
+            let xdg_shell = xdg_shell_state.expect("XdgShell state is required for XDG mode");
+            let xdg_window = xdg_shell.create_window(wl_surface.clone(), WindowDecorations::None, qh);
+            xdg_window.set_title("cce-cloud");
+            xdg_window.set_app_id(app_id);
+            xdg_window.commit();
+            AppWindow::Xdg(xdg_window)
         } else {
-            window.set_anchor(Anchor::empty());
-        }
-        wl_surface.commit();
+            let layer_window = layer_shell_state.create_layer_surface(
+                qh,
+                wl_surface.clone(),
+                Layer::Overlay,
+                Some(app_id),
+                None,
+            );
+            layer_window.set_size(width, height);
+            layer_window.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+            if x_pos.is_some() || y_pos.is_some() {
+                let x = x_pos.unwrap_or(0);
+                let y = y_pos.unwrap_or(0);
+                if align_right {
+                    layer_window.set_anchor(Anchor::TOP | Anchor::RIGHT);
+                    layer_window.set_margin(y, x, 0, 0);
+                } else {
+                    layer_window.set_anchor(Anchor::TOP | Anchor::LEFT);
+                    layer_window.set_margin(y, 0, 0, x);
+                }
+            } else {
+                layer_window.set_anchor(Anchor::empty());
+            }
+            wl_surface.commit();
+            AppWindow::Layer(layer_window)
+        };
 
         let wayland_handle = Box::leak(Box::new(cce_ui::wayland::WaylandSurfaceHandle {
             display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
@@ -1080,7 +1105,10 @@ impl State {
         let target_width_u32 = target_width.round() as u32;
         
         if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
-            self.window.set_size(target_width_u32, target_height_u32);
+            match &self.window {
+                AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
+                AppWindow::Xdg(_) => {}
+            }
             self.wl_surface.commit();
             
             let pw = (target_width_u32 as f64 * self.scale) as u32;
@@ -1311,7 +1339,7 @@ struct AppState {
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
 
-    window: Option<LayerSurface>,
+    window: Option<AppWindow>,
     surface: Option<wl_surface::WlSurface>,
 
     state: Option<State>,
@@ -1321,6 +1349,7 @@ struct AppState {
     fade_out: bool,
     fade_start: Option<std::time::Instant>,
     fade_factor: f32,
+    cce_toplevel: Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>,
 }
 
 impl AppState {
@@ -1718,6 +1747,33 @@ impl LayerShellHandler for AppState {
     }
 }
 
+impl WindowHandler for AppState {
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _window: &XdgWindow,
+        configure: WindowConfigure,
+        _serial: u32,
+    ) {
+        let (w, h) = configure.new_size;
+        if let (Some(w), Some(h)) = (w, h) {
+            let width = w.get();
+            let height = h.get();
+            if let Some(state) = &mut self.state {
+                let pw = (width as f64 * state.scale) as u32;
+                let ph = (height as f64 * state.scale) as u32;
+                state.resize(pw, ph);
+            }
+        }
+        self.redraw = true;
+    }
+
+    fn request_close(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _window: &XdgWindow) {
+        self.exit = true;
+    }
+}
+
 impl ProvidesRegistryState for AppState {
     fn registry(&mut self) -> &mut RegistryState {
         &mut self.registry_state
@@ -1749,6 +1805,73 @@ delegate_pointer!(AppState);
 delegate_keyboard!(AppState);
 delegate_registry!(AppState);
 delegate_output!(AppState);
+delegate_xdg_shell!(AppState);
+delegate_xdg_window!(AppState);
+
+impl wayland_client::Dispatch<cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1,
+        _event: cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {}
+
+    wayland_client::event_created_child!(
+        AppState,
+        cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1,
+        [
+            6 => (cce_ui::protocol::cce_window_management_v1::zcce_window_v1::ZcceWindowV1, ()),
+            7 => (cce_ui::protocol::cce_window_management_v1::zcce_output_v1::ZcceOutputV1, ()),
+            8 => (cce_ui::protocol::cce_window_management_v1::zcce_seat_v1::ZcceSeatV1, ()),
+        ]
+    );
+}
+
+impl wayland_client::Dispatch<cce_ui::protocol::cce_window_management_v1::zcce_window_v1::ZcceWindowV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &cce_ui::protocol::cce_window_management_v1::zcce_window_v1::ZcceWindowV1,
+        _event: cce_ui::protocol::cce_window_management_v1::zcce_window_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {}
+}
+
+impl wayland_client::Dispatch<cce_ui::protocol::cce_window_management_v1::zcce_output_v1::ZcceOutputV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &cce_ui::protocol::cce_window_management_v1::zcce_output_v1::ZcceOutputV1,
+        _event: cce_ui::protocol::cce_window_management_v1::zcce_output_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {}
+}
+
+impl wayland_client::Dispatch<cce_ui::protocol::cce_window_management_v1::zcce_seat_v1::ZcceSeatV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &cce_ui::protocol::cce_window_management_v1::zcce_seat_v1::ZcceSeatV1,
+        _event: cce_ui::protocol::cce_window_management_v1::zcce_seat_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {}
+}
+
+impl wayland_client::Dispatch<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1, ()> for AppState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1,
+        _event: cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {}
+}
 
 impl AppState {
     fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: cce_ui::widget::ElementState) {
@@ -1998,6 +2121,7 @@ fn main() {
     let shm_state = Shm::bind(&globals, &qh).unwrap();
     let seat_state = SeatState::new(&globals, &qh);
     let output_state = OutputState::new(&globals, &qh);
+    let cce_wm = globals.bind::<cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1, _, _>(&qh, 2..=4, ()).ok();
 
     let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
 
@@ -2015,11 +2139,12 @@ fn main() {
         surface: None,
         state: None,
         exit: false,
-        redraw: true,
+        redraw: false,
         ctrl_pressed: false,
         fade_out: false,
         fade_start: None,
         fade_factor: 1.0,
+        cce_toplevel: None,
     };
 
     // Perform a roundtrip to populate output_state with active output scales
@@ -2027,11 +2152,16 @@ fn main() {
 
     let scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
 
+    let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
+    let use_xdg = cce_wm.is_some() && xdg_shell_state.is_some();
+
     let state = pollster::block_on(State::new(
         &conn,
         &qh,
         &app.compositor_state,
         &app.layer_shell_state,
+        xdg_shell_state.as_ref(),
+        use_xdg,
         prompt,
         stdin_sender,
         mode,
@@ -2046,6 +2176,14 @@ fn main() {
     app.window = Some(state.window.clone());
     app.surface = Some(state.wl_surface.clone());
     app.state = Some(state);
+
+    if let Some(ref wm) = cce_wm {
+        if let Some(ref surface) = app.surface {
+            let toplevel = wm.get_cce_toplevel(surface, &qh, ());
+            toplevel.set_popup();
+            app.cce_toplevel = Some(toplevel);
+        }
+    }
 
     let mut event_loop = calloop::EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
@@ -2113,7 +2251,10 @@ fn main() {
     }
 
     if let Some(state) = &mut app.state {
-        state.window.set_keyboard_interactivity(KeyboardInteractivity::None);
+        match &state.window {
+            AppWindow::Layer(layer) => layer.set_keyboard_interactivity(KeyboardInteractivity::None),
+            AppWindow::Xdg(_) => {}
+        }
         state.wl_surface.commit();
     }
     drop(app);
