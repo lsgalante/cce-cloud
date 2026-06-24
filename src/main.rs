@@ -2275,6 +2275,7 @@ fn main() {
 
     let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
     let use_xdg = cce_wm.is_some() && xdg_shell_state.is_some() && x_pos.is_none() && y_pos.is_none();
+    eprintln!("[cce-cloud] Starting launcher window: x_pos={:?}, y_pos={:?}, align_right={}, scale={}, use_xdg={}", x_pos, y_pos, align_right, scale, use_xdg);
 
     let (state, cce_toplevel) = pollster::block_on(State::new(
         &conn,
