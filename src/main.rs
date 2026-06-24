@@ -86,6 +86,86 @@ fn quad_vertices(
     ]
 }
 
+fn rounded_rect_vertices_corners(
+    x: f32, y: f32, ww: f32, h: f32,
+    r: f32,
+    sw: f32, sh: f32,
+    color: [f32; 4],
+    corners: (bool, bool, bool, bool),
+) -> Vec<Vertex> {
+    let mut verts = Vec::new();
+    let r = r.min(ww * 0.5).min(h * 0.5);
+
+    let push_quad = |verts: &mut Vec<Vertex>, qx: f32, qy: f32, qw: f32, qh: f32| {
+        let x0 = qx;
+        let y0 = qy;
+        let x1 = qx + qw;
+        let y1 = qy + qh;
+        
+        let ndc_x0 = (x0 / sw) * 2.0 - 1.0;
+        let ndc_y0 = 1.0 - (y0 / sh) * 2.0;
+        let ndc_x1 = (x1 / sw) * 2.0 - 1.0;
+        let ndc_y1 = 1.0 - (y1 / sh) * 2.0;
+        
+        let clip_circle = [0.0, 0.0, 0.0];
+        verts.push(Vertex { position: [ndc_x0, ndc_y0], color, clip_circle });
+        verts.push(Vertex { position: [ndc_x1, ndc_y0], color, clip_circle });
+        verts.push(Vertex { position: [ndc_x0, ndc_y1], color, clip_circle });
+        verts.push(Vertex { position: [ndc_x1, ndc_y0], color, clip_circle });
+        verts.push(Vertex { position: [ndc_x1, ndc_y1], color, clip_circle });
+        verts.push(Vertex { position: [ndc_x0, ndc_y1], color, clip_circle });
+    };
+
+    if r <= 0.1 || (!corners.0 && !corners.1 && !corners.2 && !corners.3) {
+        push_quad(&mut verts, x, y, ww, h);
+        return verts;
+    }
+
+    push_quad(&mut verts, x + r, y, ww - 2.0 * r, h);
+    push_quad(&mut verts, x, y + r, r, h - 2.0 * r);
+    push_quad(&mut verts, x + ww - r, y + r, r, h - 2.0 * r);
+
+    let corner_configs = [
+        (corners.0, x, y, x + r, y + r, std::f32::consts::PI, 1.5 * std::f32::consts::PI),
+        (corners.1, x + ww - r, y, x + ww - r, y + r, 1.5 * std::f32::consts::PI, 2.0 * std::f32::consts::PI),
+        (corners.2, x + ww - r, y + h - r, x + ww - r, y + h - r, 0.0, 0.5 * std::f32::consts::PI),
+        (corners.3, x, y + h - r, x + r, y + h - r, 0.5 * std::f32::consts::PI, std::f32::consts::PI),
+    ];
+
+    let segments = 16;
+    for &(is_rounded, sqx, sqy, cx, cy, start, end) in &corner_configs {
+        if is_rounded {
+            for i in 0..segments {
+                let theta1 = start + (i as f32) * (end - start) / (segments as f32);
+                let theta2 = start + ((i + 1) as f32) * (end - start) / (segments as f32);
+                
+                let x0 = cx;
+                let y0 = cy;
+                let x1 = cx + r * theta1.cos();
+                let y1 = cy + r * theta1.sin();
+                let x2 = cx + r * theta2.cos();
+                let y2 = cy + r * theta2.sin();
+                
+                let ndc_x0 = (x0 / sw) * 2.0 - 1.0;
+                let ndc_y0 = 1.0 - (y0 / sh) * 2.0;
+                let ndc_x1 = (x1 / sw) * 2.0 - 1.0;
+                let ndc_y1 = 1.0 - (y1 / sh) * 2.0;
+                let ndc_x2 = (x2 / sw) * 2.0 - 1.0;
+                let ndc_y2 = 1.0 - (y2 / sh) * 2.0;
+                
+                let clip_circle = [0.0, 0.0, 0.0];
+                verts.push(Vertex { position: [ndc_x0, ndc_y0], color, clip_circle });
+                verts.push(Vertex { position: [ndc_x1, ndc_y1], color, clip_circle });
+                verts.push(Vertex { position: [ndc_x2, ndc_y2], color, clip_circle });
+            }
+        } else {
+            push_quad(&mut verts, sqx, sqy, r, r);
+        }
+    }
+
+    verts
+}
+
 fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
     let (x, y, ww, h) = w.rect();
     let mut verts = quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec();
@@ -710,6 +790,7 @@ struct State {
     select_item: Option<String>,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
+    root_window: cce_ui::widget::Window,
 }
 
 impl State {
@@ -999,6 +1080,12 @@ impl State {
         };
 
         let opacity = read_opacity_if_configured();
+        let mut bg_color = cce_ui::color::page_low_color();
+        bg_color[3] = opacity;
+        let root_window = cce_ui::widget::Window::new(0.0, 0.0, lw, lh)
+            .with_background(bg_color)
+            .with_radius(cce_ui::color::window_corner_radius())
+            .with_border([0.22, 0.22, 0.28, 1.0], 1.5);
 
         let mut state = Self {
             window,
@@ -1034,6 +1121,7 @@ impl State {
             select_item,
             last_tick: std::time::Instant::now(),
             ui_context: cce_ui::context::UiContext::new(),
+            root_window,
         };
 
         state.check_stdin_updates();
@@ -1130,6 +1218,7 @@ impl State {
 
     fn apply_layout(&mut self) {
         let (w, h) = (self.width, self.height);
+        self.root_window.set_rect(0.0, 0.0, w, h);
         if self.mode == LauncherMode::Json {
             if let Some(jl) = &mut self.json_layout {
                 cce_ui::scale::set_scale_factor(self.scale as f32);
@@ -1143,19 +1232,40 @@ impl State {
     fn collect_vertices(&self) -> Vec<Vertex> {
         let sw = self.width;
         let sh = self.height;
+        let mut verts = Vec::new();
+
+        // 1. Draw root_window background (with rounded corners if radius is set)
+        let bg_color = self.root_window.color();
+        if bg_color[3] > 0.0 {
+            let r = self.root_window.corner_radius();
+            let corners = self.root_window.rounded_corners();
+            let (wx, wy, ww, wh) = self.root_window.rect();
+            verts.extend(rounded_rect_vertices_corners(wx, wy, ww, wh, r, sw, sh, bg_color, corners));
+        }
+
+        // 2. Draw root_window border
+        if let Some((b_color, b_thickness)) = self.root_window.solid_border() {
+            let (wx, wy, ww, wh) = self.root_window.rect();
+            // Top border
+            verts.extend(quad_vertices(wx, wy, ww, b_thickness, sw, sh, b_color));
+            // Bottom border
+            verts.extend(quad_vertices(wx, wy + wh - b_thickness, ww, b_thickness, sw, sh, b_color));
+            // Left border
+            verts.extend(quad_vertices(wx, wy, b_thickness, wh, sw, sh, b_color));
+            // Right border
+            verts.extend(quad_vertices(wx + ww - b_thickness, wy, b_thickness, wh, sw, sh, b_color));
+        }
+
+        // 3. Draw child widgets
         if self.mode == LauncherMode::Json {
             if let Some(jl) = &self.json_layout {
-                let mut verts = quad_vertices(0.0, 0.0, sw, sh, sw, sh, [0.05, 0.05, 0.08, self.opacity]).to_vec();
                 verts.extend(widget_vertices(jl, sw, sh));
-                verts
-            } else {
-                Vec::new()
             }
         } else {
-            let mut verts = quad_vertices(0.0, 0.0, sw, sh, sw, sh, [0.05, 0.05, 0.08, self.opacity]).to_vec();
             verts.extend(widget_vertices(&self.fuzzel, sw, sh));
-            verts
         }
+
+        verts
     }
 
     fn upload_vertices(&mut self) {
