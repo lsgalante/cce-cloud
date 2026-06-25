@@ -732,6 +732,7 @@ struct AppInfo {
 struct StdinState {
     items: Vec<String>,
     new_data: bool,
+    cycle_next: usize,
 }
 
 
@@ -778,6 +779,7 @@ struct State {
     max_width: u32,
     max_height: u32,
     select_item: Option<String>,
+    switcher_mode: bool,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
     root_window: cce_ui::widget::Window,
@@ -800,6 +802,7 @@ impl State {
         align_right: bool,
         scale: f64,
         select_item: Option<String>,
+        switcher_mode: bool,
         json_layout_config: Option<JsonLayoutConfig>,
     ) -> (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>) {
         cce_ui::scale::set_scale_factor(scale as f32);
@@ -1024,6 +1027,7 @@ impl State {
         let stdin_state = Arc::new(Mutex::new(StdinState {
             items: Vec::new(),
             new_data: false,
+            cycle_next: 0,
         }));
 
         let mut apps = Vec::new();
@@ -1034,8 +1038,13 @@ impl State {
                 for line in stdin.lock().lines() {
                     if let Ok(line) = line {
                         if let Ok(mut lock_state) = stdin_state_clone.lock() {
-                            lock_state.items.push(line);
-                            lock_state.new_data = true;
+                            if line == "__cce_switcher_next__" {
+                                lock_state.cycle_next += 1;
+                                lock_state.new_data = true;
+                            } else {
+                                lock_state.items.push(line);
+                                lock_state.new_data = true;
+                            }
                         }
                         let _ = stdin_sender.send(());
                     }
@@ -1108,6 +1117,7 @@ impl State {
             max_width: width,
             max_height: height,
             select_item,
+            switcher_mode,
             last_tick: std::time::Instant::now(),
             ui_context: cce_ui::context::UiContext::new(),
             root_window,
@@ -1124,23 +1134,38 @@ impl State {
         if let Ok(mut lock) = self.stdin_state.lock() {
             if lock.new_data {
                 lock.new_data = false;
+
+                let cycles = lock.cycle_next;
+                lock.cycle_next = 0;
+
+                let mut changed = false;
                 let items = lock.items.clone();
-                eprintln!("[cce-cloud debug] check_stdin_updates: items={:?}, select_item={:?}, currently selected={}", items, self.select_item, self.fuzzel.selected);
-                self.fuzzel.set_items(items);
-                if let Some(ref select_name) = self.select_item {
-                    let select_lower = select_name.to_lowercase();
-                    if let Some(idx) = self.fuzzel.filtered_items.iter().position(|item| item.to_lowercase() == select_lower) {
-                        eprintln!("[cce-cloud debug] Found match for select_item {:?} at index {}, setting selected", select_name, idx);
-                        self.fuzzel.selected = idx;
+                if self.fuzzel.all_items != items {
+                    self.fuzzel.set_items(items);
+                    changed = true;
+                    if let Some(ref select_name) = self.select_item {
+                        let select_lower = select_name.to_lowercase();
+                        if let Some(idx) = self.fuzzel.filtered_items.iter().position(|item| item.to_lowercase() == select_lower) {
+                            self.fuzzel.selected = idx;
+                            self.fuzzel.update_scroll();
+                            self.fuzzel.snap_to_selected();
+                            self.select_item = None;
+                        }
+                    } else if self.switcher_mode && self.fuzzel.filtered_items.len() > 1 {
+                        self.fuzzel.selected = 1;
                         self.fuzzel.update_scroll();
                         self.fuzzel.snap_to_selected();
-                        self.select_item = None;
-                    } else {
-                        eprintln!("[cce-cloud debug] No match found for select_item {:?} in filtered_items {:?}", select_name, self.fuzzel.filtered_items);
                     }
                 }
-                eprintln!("[cce-cloud debug] check_stdin_updates done: selected={}", self.fuzzel.selected);
-                return true;
+
+                if cycles > 0 && !self.fuzzel.filtered_items.is_empty() {
+                    self.fuzzel.selected = (self.fuzzel.selected + cycles) % self.fuzzel.filtered_items.len();
+                    self.fuzzel.update_scroll();
+                    self.fuzzel.snap_to_selected();
+                    changed = true;
+                }
+
+                return changed;
             }
         }
         false
@@ -1456,6 +1481,8 @@ struct AppState {
     exit: bool,
     redraw: bool,
     ctrl_pressed: bool,
+    super_pressed: bool,
+    switcher_mode: bool,
     fade_out: bool,
     fade_start: Option<std::time::Instant>,
     fade_factor: f32,
@@ -1468,6 +1495,34 @@ impl AppState {
             self.fade_out = true;
             self.fade_start = Some(std::time::Instant::now());
             self.redraw = true;
+        }
+    }
+
+    fn trigger_select_and_close(&mut self) {
+        let mut should_close = false;
+        if let Some(st) = &mut self.state {
+            if !st.fuzzel.filtered_items.is_empty() {
+                if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                    println!("{}", item);
+                    match st.mode {
+                        LauncherMode::Apps => {
+                            if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                record_app_launch(&app.name);
+                                spawn_command(&app.exec);
+                            }
+                        }
+                        LauncherMode::Path => {
+                            spawn_command(item);
+                        }
+                        LauncherMode::Dmenu => {}
+                        LauncherMode::Json => {}
+                    }
+                    should_close = true;
+                }
+            }
+        }
+        if should_close {
+            self.trigger_close();
         }
     }
 }
@@ -1667,7 +1722,7 @@ impl PointerHandler for AppState {
                                     &mut st.ui_context,
                                 );
                                 if changed {
-                                    if st.fuzzel.selected == prev_selected {
+                                    if st.fuzzel.selected == prev_selected || st.switcher_mode || st.mode == LauncherMode::Dmenu {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                             println!("{}", item);
                                             match st.mode {
@@ -1830,7 +1885,14 @@ impl KeyboardHandler for AppState {
         modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
         _layout: u32,
     ) {
+        let prev_super = self.super_pressed;
         self.ctrl_pressed = modifiers.ctrl;
+        self.super_pressed = modifiers.logo;
+
+        if self.switcher_mode && prev_super && !self.super_pressed {
+            eprintln!("[clear-cloud] Super modifier released in switcher mode, selecting currently highlighted item");
+            self.trigger_select_and_close();
+        }
     }
 }
 
@@ -2048,22 +2110,15 @@ impl AppState {
                         should_close = true;
                     }
                     Key::Named(NamedKey::Enter) => {
-                        if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
-                            println!("{}", item);
-                            match st.mode {
-                                LauncherMode::Apps => {
-                                    if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
-                                        record_app_launch(&app.name);
-                                        spawn_command(&app.exec);
-                                    }
-                                }
-                                LauncherMode::Path => {
-                                    spawn_command(item);
-                                }
-                                LauncherMode::Dmenu => {}
-                                LauncherMode::Json => {}
-                            }
-                            should_close = true;
+                        self.trigger_select_and_close();
+                    }
+                    Key::Named(NamedKey::Tab) => {
+                        if !st.fuzzel.filtered_items.is_empty() {
+                            st.fuzzel.selected = (st.fuzzel.selected + 1) % st.fuzzel.filtered_items.len();
+                            st.fuzzel.update_scroll();
+                            st.fuzzel.snap_to_selected();
+                            st.upload_vertices();
+                            self.redraw = true;
                         }
                     }
                     Key::Named(NamedKey::ArrowDown) => {
@@ -2127,6 +2182,7 @@ fn main() {
     let mut y_pos: Option<i32> = None;
     let mut select_item: Option<String> = None;
     let mut align_right = false;
+    let mut switcher_mode = false;
 
     let args = std::env::args().skip(1).collect::<Vec<String>>();
     let mut i = 0;
@@ -2192,6 +2248,10 @@ fn main() {
         } else if arg == "--align-right" {
             align_right = true;
             i += 1;
+        } else if arg == "--switcher" {
+            switcher_mode = true;
+            mode = LauncherMode::Dmenu;
+            i += 1;
         } else {
             i += 1;
         }
@@ -2251,6 +2311,8 @@ fn main() {
         exit: false,
         redraw: false,
         ctrl_pressed: false,
+        super_pressed: false,
+        switcher_mode,
         fade_out: false,
         fade_start: None,
         fade_factor: 1.0,
@@ -2282,6 +2344,7 @@ fn main() {
         align_right,
         scale,
         select_item,
+        switcher_mode,
         json_layout_config,
     ));
 
