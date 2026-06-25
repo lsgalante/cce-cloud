@@ -783,7 +783,7 @@ struct State {
     switcher_mode: bool,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
-    root_window: cce_ui::widget::Window,
+    root_window: cce_ui::widget::Backplate,
     select_and_close_requested: bool,
 }
 
@@ -1086,9 +1086,9 @@ impl State {
 
         cce_ui::scale::set_app_id("cce-cloud".to_string());
         let bg_color = cce_ui::color::page_low_color();
-        let root_window = cce_ui::widget::Window::new(0.0, 0.0, lw, lh)
+        let root_window = cce_ui::widget::Backplate::new(0.0, 0.0, lw, lh)
             .with_background(bg_color)
-            .with_radius(cce_ui::color::window_corner_radius())
+            .with_radius(cce_ui::color::backplate_corner_radius())
             .with_border([0.22, 0.22, 0.28, 1.0], 1.5);
 
         let mut state = Self {
