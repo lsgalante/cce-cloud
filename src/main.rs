@@ -1423,7 +1423,7 @@ impl State {
             }
             Err(wgpu::SurfaceError::Timeout) => return false,
             Err(e) => {
-                eprintln!("Surface error: {e:?}");
+                log::error!("Surface error: {e:?}");
                 return false;
             }
         };
@@ -1684,7 +1684,7 @@ impl PointerHandler for AppState {
         let mut should_close = false;
         for event in events {
             if let Some(st) = &mut self.state {
-                eprintln!("[cce-cloud pointer] Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
+                log::debug!("Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
                 let (cx, cy) = cce_ui::wayland::scale_pointer_pos(event.position, st.scale);
                 match &event.kind {
                     PointerEventKind::Motion { .. } => {
@@ -1849,7 +1849,7 @@ impl KeyboardHandler for AppState {
         _raw_modifiers: &[u32],
         _keysyms: &[xkeysym::Keysym],
     ) {
-        eprintln!("[clear-cloud debug] KeyboardHandler::enter called!");
+        log::debug!("KeyboardHandler::enter called!");
     }
 
     fn leave(
@@ -1860,7 +1860,7 @@ impl KeyboardHandler for AppState {
         _surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
-        eprintln!("[clear-cloud debug] KeyboardHandler::leave called!");
+        log::debug!("KeyboardHandler::leave called!");
         self.trigger_close();
     }
 
@@ -1872,7 +1872,7 @@ impl KeyboardHandler for AppState {
         _serial: u32,
         event: smithay_client_toolkit::seat::keyboard::KeyEvent,
     ) {
-        eprintln!("[clear-cloud debug] press_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
+        log::debug!("press_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
         self.handle_key(event, cce_ui::widget::ElementState::Pressed);
     }
 
@@ -1884,7 +1884,7 @@ impl KeyboardHandler for AppState {
         _serial: u32,
         event: smithay_client_toolkit::seat::keyboard::KeyEvent,
     ) {
-        eprintln!("[clear-cloud debug] release_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
+        log::debug!("release_key keysym={:?}, utf8={:?}", event.keysym, event.utf8);
         self.handle_key(event, cce_ui::widget::ElementState::Released);
     }
 
@@ -1900,10 +1900,10 @@ impl KeyboardHandler for AppState {
         let prev_super = self.super_pressed;
         self.ctrl_pressed = modifiers.ctrl;
         self.super_pressed = modifiers.logo;
-        eprintln!("[clear-cloud] update_modifiers: logo={}, prev_logo={}", modifiers.logo, prev_super);
+        log::debug!("update_modifiers: logo={}, prev_logo={}", modifiers.logo, prev_super);
 
         if self.switcher_mode && prev_super && !self.super_pressed {
-            eprintln!("[clear-cloud] Super modifier released in switcher mode, selecting currently highlighted item");
+            log::info!("Super modifier released in switcher mode, selecting currently highlighted item");
             self.trigger_select_and_close();
         }
     }
@@ -2185,6 +2185,9 @@ impl AppState {
 }
 
 fn main() {
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let mut prompt = "Search: ".to_string();
     let mut mode = if !io::stdin().is_terminal() {
         LauncherMode::Dmenu
@@ -2339,7 +2342,7 @@ fn main() {
 
     let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
     let use_xdg = cce_wm.is_some() && xdg_shell_state.is_some() && x_pos.is_none() && y_pos.is_none();
-    eprintln!("[cce-cloud] Starting launcher window: x_pos={:?}, y_pos={:?}, align_right={}, scale={}, use_xdg={}", x_pos, y_pos, align_right, scale, use_xdg);
+    log::info!("Starting launcher window: x_pos={:?}, y_pos={:?}, align_right={}, scale={}, use_xdg={}", x_pos, y_pos, align_right, scale, use_xdg);
 
     let (state, cce_toplevel) = pollster::block_on(State::new(
         &conn,
