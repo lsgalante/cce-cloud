@@ -734,17 +734,7 @@ struct StdinState {
     new_data: bool,
 }
 
-fn read_opacity_if_configured() -> f32 {
-    let config_path = "/home/lsgalante/.config/cce/config.json";
-    if let Ok(content) = std::fs::read_to_string(config_path) {
-        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(opacity) = val.pointer("/transparency/opacity").and_then(|v| v.as_f64()) {
-                return opacity as f32;
-            }
-        }
-    }
-    0.20 // default opacity for cce-cloud
-}
+
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -783,7 +773,7 @@ struct State {
     stdin_state: Arc<Mutex<StdinState>>,
     mode: LauncherMode,
     apps: Vec<AppInfo>,
-    opacity: f32,
+
     fade_factor: f32,
     max_width: u32,
     max_height: u32,
@@ -1079,9 +1069,8 @@ impl State {
             None
         };
 
-        let opacity = read_opacity_if_configured();
-        let mut bg_color = cce_ui::color::page_low_color();
-        bg_color[3] = opacity;
+        cce_ui::scale::set_app_id("cce-cloud".to_string());
+        let bg_color = cce_ui::color::page_low_color();
         let root_window = cce_ui::widget::Window::new(0.0, 0.0, lw, lh)
             .with_background(bg_color)
             .with_radius(cce_ui::color::window_corner_radius())
@@ -1114,7 +1103,7 @@ impl State {
             stdin_state,
             mode,
             apps,
-            opacity,
+
             fade_factor: 1.0,
             max_width: width,
             max_height: height,
