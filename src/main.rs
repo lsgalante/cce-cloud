@@ -2311,7 +2311,7 @@ fn main() {
         exit: false,
         redraw: false,
         ctrl_pressed: false,
-        super_pressed: false,
+        super_pressed: switcher_mode,
         switcher_mode,
         fade_out: false,
         fade_start: None,
