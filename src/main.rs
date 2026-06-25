@@ -733,6 +733,7 @@ struct StdinState {
     items: Vec<String>,
     new_data: bool,
     cycle_next: usize,
+    select_and_close: bool,
 }
 
 
@@ -783,6 +784,7 @@ struct State {
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
     root_window: cce_ui::widget::Window,
+    select_and_close_requested: bool,
 }
 
 impl State {
@@ -1028,6 +1030,7 @@ impl State {
             items: Vec::new(),
             new_data: false,
             cycle_next: 0,
+            select_and_close: false,
         }));
 
         let mut apps = Vec::new();
@@ -1040,6 +1043,9 @@ impl State {
                         if let Ok(mut lock_state) = stdin_state_clone.lock() {
                             if line == "__cce_switcher_next__" {
                                 lock_state.cycle_next += 1;
+                                lock_state.new_data = true;
+                            } else if line == "__cce_switcher_select_and_close__" {
+                                lock_state.select_and_close = true;
                                 lock_state.new_data = true;
                             } else {
                                 lock_state.items.push(line);
@@ -1121,6 +1127,7 @@ impl State {
             last_tick: std::time::Instant::now(),
             ui_context: cce_ui::context::UiContext::new(),
             root_window,
+            select_and_close_requested: false,
         };
 
         state.check_stdin_updates();
@@ -1134,6 +1141,11 @@ impl State {
         if let Ok(mut lock) = self.stdin_state.lock() {
             if lock.new_data {
                 lock.new_data = false;
+
+                if lock.select_and_close {
+                    lock.select_and_close = false;
+                    self.select_and_close_requested = true;
+                }
 
                 let cycles = lock.cycle_next;
                 lock.cycle_next = 0;
@@ -1888,6 +1900,7 @@ impl KeyboardHandler for AppState {
         let prev_super = self.super_pressed;
         self.ctrl_pressed = modifiers.ctrl;
         self.super_pressed = modifiers.logo;
+        eprintln!("[clear-cloud] update_modifiers: logo={}, prev_logo={}", modifiers.logo, prev_super);
 
         if self.switcher_mode && prev_super && !self.super_pressed {
             eprintln!("[clear-cloud] Super modifier released in switcher mode, selecting currently highlighted item");
@@ -2360,6 +2373,7 @@ fn main() {
 
     loop_handle.insert_source(stdin_channel, |event, _metadata, app_state: &mut AppState| {
         if let calloop::channel::Event::Msg(()) = event {
+            let mut select_and_close = false;
             if let Some(st) = &mut app_state.state {
                 if st.check_stdin_updates() {
                     st.update_desired_size();
@@ -2367,6 +2381,13 @@ fn main() {
                     st.upload_vertices();
                     app_state.redraw = true;
                 }
+                if st.select_and_close_requested {
+                    st.select_and_close_requested = false;
+                    select_and_close = true;
+                }
+            }
+            if select_and_close {
+                app_state.trigger_select_and_close();
             }
         }
     }).unwrap();
