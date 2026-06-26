@@ -2502,6 +2502,7 @@ mod tests {
                 value_f32: None,
                 min_f32: None,
                 max_f32: None,
+                target_page: None,
             },
             JsonWidgetConfig {
                 widget_type: "checkbox".to_string(),
@@ -2517,6 +2518,7 @@ mod tests {
                 value_f32: None,
                 min_f32: None,
                 max_f32: None,
+                target_page: None,
             },
             JsonWidgetConfig {
                 widget_type: "button".to_string(),
@@ -2532,6 +2534,7 @@ mod tests {
                 value_f32: None,
                 min_f32: None,
                 max_f32: None,
+                target_page: None,
             },
         ];
 
