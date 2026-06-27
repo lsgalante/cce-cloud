@@ -1088,8 +1088,7 @@ impl State {
         let bg_color = cce_ui::color::page_low_color();
         let root_window = cce_ui::widget::Backplate::new(0.0, 0.0, lw, lh)
             .with_background(bg_color)
-            .with_radius(cce_ui::color::backplate_corner_radius())
-            .with_border([0.22, 0.22, 0.28, 1.0], 1.5);
+            .with_radius(cce_ui::color::backplate_corner_radius());
 
         let mut state = Self {
             window,
