@@ -810,7 +810,39 @@ impl State {
         cce_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Json {
             if let Some(ref config) = json_layout_config {
-                let w = config.width.unwrap_or(300);
+                let w = config.width.unwrap_or_else(|| {
+                    let mut max_widget_w = 120.0f32; // fallback minimum
+                    if let Some(ref widgets) = config.widgets {
+                        for w_conf in widgets {
+                            let w_w = match w_conf.widget_type.as_str() {
+                                "button" | "label" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 32.0,
+                                "checkbox" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 44.0,
+                                "spinbox" | "color" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 120.0,
+                                "slider" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 160.0,
+                                _ => 150.0,
+                            };
+                            if w_w > max_widget_w {
+                                max_widget_w = w_w;
+                            }
+                        }
+                    } else if let Some(ref pages) = config.pages {
+                        for page in pages {
+                            for w_conf in &page.widgets {
+                                let w_w = match w_conf.widget_type.as_str() {
+                                    "button" | "label" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 32.0,
+                                    "checkbox" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 44.0,
+                                    "spinbox" | "color" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 120.0,
+                                    "slider" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 160.0,
+                                    _ => 150.0,
+                                };
+                                if w_w > max_widget_w {
+                                    max_widget_w = w_w;
+                                }
+                            }
+                        }
+                    }
+                    max_widget_w.round() as u32
+                });
                 let h = config.height.unwrap_or_else(|| {
                     let mut current_y = 16.0f32;
                     if let Some(ref widgets) = config.widgets {
@@ -847,7 +879,7 @@ impl State {
                         current_y = max_page_y;
                     }
                     current_y += 4.0;
-                    current_y.round() as u32
+                    std::cmp::min(current_y.round() as u32, 600)
                 });
                 (w, h)
             } else {
@@ -1184,6 +1216,44 @@ impl State {
 
     fn update_desired_size(&mut self) {
         if self.mode == LauncherMode::Json {
+            if let Some(ref jl) = self.json_layout {
+                let mut max_widget_w = 120.0f32; // fallback minimum
+                let active_page = jl.active_page;
+                
+                for w in &jl.widgets {
+                    if w.page_idx != active_page {
+                        continue;
+                    }
+                    let w_w = match w.widget_type.as_str() {
+                        "button" | "label" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 32.0,
+                        "checkbox" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 44.0,
+                        "spinbox" | "color" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 120.0,
+                        "slider" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 160.0,
+                        _ => 150.0,
+                    };
+                    if w_w > max_widget_w {
+                        max_widget_w = w_w;
+                    }
+                }
+                
+                let target_height = jl.page_total_heights[active_page].min(self.max_height as f32);
+                let target_width = max_widget_w.clamp(120.0, self.max_width as f32);
+                
+                let target_height_u32 = target_height.round() as u32;
+                let target_width_u32 = target_width.round() as u32;
+                
+                if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
+                    match &self.window {
+                        AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
+                        AppWindow::Xdg(_) => {}
+                    }
+                    self.wl_surface.commit();
+                    
+                    let pw = (target_width_u32 as f64 * self.scale) as u32;
+                    let ph = (target_height_u32 as f64 * self.scale) as u32;
+                    self.resize(pw, ph);
+                }
+            }
             return;
         }
         let num_items = self.fuzzel.filtered_items.len();
@@ -1284,7 +1354,12 @@ impl State {
         // 3. Draw child widgets
         if self.mode == LauncherMode::Json {
             if let Some(jl) = &self.json_layout {
-                verts.extend(widget_vertices(jl, sw, sh));
+                for (qx, qy, qw, qh, qc) in jl.all_quads(&self.ui_context) {
+                    verts.extend(quad_vertices(qx, qy, qw, qh, sw, sh, qc));
+                }
+                for (qx, qy, qw, qh, qr, qc, qcorners) in jl.all_rounded_quads(&self.ui_context) {
+                    verts.extend(rounded_rect_vertices_corners(qx, qy, qw, qh, qr, sw, sh, qc, qcorners));
+                }
             }
         } else {
             verts.extend(widget_vertices(&self.fuzzel, sw, sh));
@@ -2542,6 +2617,7 @@ mod tests {
             height: Some(400),
             widgets: Some(widgets_conf),
             pages: None,
+            justify: None,
         };
 
         let mut layout = JsonLayoutWidget::new(&config);
