@@ -748,7 +748,7 @@ enum AppWindow {
 }
 
 struct State {
-    window: AppWindow,
+    window: Option<AppWindow>,
     wl_surface: wl_surface::WlSurface,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -1130,7 +1130,7 @@ impl State {
             .with_radius(cce_ui::color::backplate_corner_radius());
 
         let mut state = Self {
-            window,
+            window: Some(window),
             wl_surface,
             surface,
             device,
@@ -1250,9 +1250,11 @@ impl State {
                 let target_width_u32 = target_width.round() as u32;
                 
                 if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
-                    match &self.window {
-                        AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
-                        AppWindow::Xdg(_) => {}
+                    if let Some(ref window) = self.window {
+                        match window {
+                            AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
+                            AppWindow::Xdg(_) => {}
+                        }
                     }
                     self.wl_surface.commit();
                     
@@ -1306,9 +1308,11 @@ impl State {
         let target_width_u32 = target_width.round() as u32;
         
         if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
-            match &self.window {
-                AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
-                AppWindow::Xdg(_) => {}
+            if let Some(ref window) = self.window {
+                match window {
+                    AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
+                    AppWindow::Xdg(_) => {}
+                }
             }
             self.wl_surface.commit();
             
@@ -1550,6 +1554,7 @@ impl State {
 
 impl Drop for State {
     fn drop(&mut self) {
+        self.window.take();
         self.wl_surface.destroy();
     }
 }
@@ -2457,7 +2462,7 @@ fn run_standalone() {
         parent_app_id,
     ));
 
-    app.window = Some(state.window.clone());
+    app.window = state.window.clone();
     app.surface = Some(state.wl_surface.clone());
     app.cce_toplevel = cce_toplevel;
     app.state = Some(state);
@@ -2536,9 +2541,11 @@ fn run_standalone() {
     }
 
     if let Some(state) = &mut app.state {
-        match &state.window {
-            AppWindow::Layer(layer) => layer.set_keyboard_interactivity(KeyboardInteractivity::None),
-            AppWindow::Xdg(_) => {}
+        if let Some(ref window) = state.window {
+            match window {
+                AppWindow::Layer(layer) => layer.set_keyboard_interactivity(KeyboardInteractivity::None),
+                AppWindow::Xdg(_) => {}
+            }
         }
         state.wl_surface.commit();
     }
@@ -2873,7 +2880,7 @@ fn run_daemon(socket_path: &str) {
         if let Some(ref mut st) = app.state {
             st.stdin_state = stdin_state.clone();
         }
-        app.window = Some(state.window.clone());
+        app.window = state.window.clone();
         app.surface = Some(state.wl_surface.clone());
         app.cce_toplevel = cce_toplevel;
         app.state = Some(state);
@@ -2940,9 +2947,11 @@ fn run_daemon(socket_path: &str) {
         let _ = stream.flush();
 
         if let Some(st) = &mut app.state {
-            match &st.window {
-                AppWindow::Layer(layer) => layer.set_keyboard_interactivity(KeyboardInteractivity::None),
-                AppWindow::Xdg(_) => {}
+            if let Some(ref window) = st.window {
+                match window {
+                    AppWindow::Layer(layer) => layer.set_keyboard_interactivity(KeyboardInteractivity::None),
+                    AppWindow::Xdg(_) => {}
+                }
             }
             st.wl_surface.commit();
         }
