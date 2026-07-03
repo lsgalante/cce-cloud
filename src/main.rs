@@ -1771,6 +1771,11 @@ impl PointerHandler for AppState {
         use smithay_client_toolkit::seat::pointer::PointerEventKind;
         let mut should_close = false;
         for event in events {
+            if let Some(ref active_surface) = self.surface {
+                if active_surface != &event.surface {
+                    continue;
+                }
+            }
             if let Some(st) = &mut self.state {
                 log::debug!("Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
                 let (cx, cy) = cce_ui::wayland::scale_pointer_pos(event.position, st.scale);
@@ -1948,11 +1953,15 @@ impl KeyboardHandler for AppState {
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
         _keyboard: &wl_keyboard::WlKeyboard,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _serial: u32,
     ) {
         log::debug!("KeyboardHandler::leave called!");
-        self.trigger_close();
+        if let Some(ref active_surface) = self.surface {
+            if active_surface == surface {
+                self.trigger_close();
+            }
+        }
     }
 
     fn press_key(
