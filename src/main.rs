@@ -178,7 +178,9 @@ fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
 fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buffer {
     let metrics = Metrics::new(size, size * 1.4);
     let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_text(font_system, text, Attrs::new(), glyphon::Shaping::Advanced);
+    let font_family = cce_ui::layout::button_font_parsed().0;
+    let attrs = Attrs::new().family(glyphon::Family::Name(&font_family));
+    buffer.set_text(font_system, text, attrs, glyphon::Shaping::Advanced);
     buffer.shape_until_scroll(font_system, true);
     buffer
 }
@@ -1044,7 +1046,7 @@ impl State {
             cache: None,
         });
 
-        let font_system = FontSystem::new();
+        let font_system = cce_ui::create_font_system();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let mut text_atlas = TextAtlas::new(&device, &queue, &cache, config.format);
@@ -1578,6 +1580,7 @@ struct AppState {
     fade_start: Option<std::time::Instant>,
     fade_factor: f32,
     cce_toplevel: Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>,
+    selected_item: Option<String>,
 }
 
 impl AppState {
@@ -1594,6 +1597,7 @@ impl AppState {
         if let Some(st) = &mut self.state {
             if !st.fuzzel.filtered_items.is_empty() {
                 if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                    self.selected_item = Some(item.clone());
                     println!("{}", item);
                     match st.mode {
                         LauncherMode::Apps => {
@@ -1816,6 +1820,7 @@ impl PointerHandler for AppState {
                                     if st.fuzzel.selected == prev_selected || st.switcher_mode || st.mode == LauncherMode::Dmenu {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                             println!("{}", item);
+                                            self.selected_item = Some(item.clone());
                                             match st.mode {
                                                 LauncherMode::Apps => {
                                                     if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
@@ -1891,7 +1896,9 @@ impl PointerHandler for AppState {
                                         "colors": colors,
                                         "sliders": sliders
                                     });
-                                    println!("{}", out_val.to_string());
+                                    let out_str = out_val.to_string();
+                                    println!("{}", out_str);
+                                    self.selected_item = Some(out_str);
                                     should_close = true;
                                 }
                             }
@@ -2263,10 +2270,7 @@ impl AppState {
     }
 }
 
-fn main() {
-    env_logger::Builder::from_default_env()
-        .filter_level(log::LevelFilter::Info)
-        .init();
+fn run_standalone() {
     let mut prompt = "Search: ".to_string();
     let mut mode = if !io::stdin().is_terminal() {
         LauncherMode::Dmenu
@@ -2420,6 +2424,7 @@ fn main() {
         fade_start: None,
         fade_factor: 1.0,
         cce_toplevel: None,
+        selected_item: None,
     };
 
     // Perform a roundtrip to populate output_state with active output scales
@@ -2539,6 +2544,442 @@ fn main() {
     }
     drop(app);
     let _ = conn_clone.roundtrip();
+}
+
+fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    let mut stream = std::os::unix::net::UnixStream::connect(socket_path)?;
+
+    let mut stdin_str = String::new();
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin().read_to_string(&mut stdin_str)?;
+    }
+
+    let payload = serde_json::json!({
+        "args": args,
+        "initial_stdin": stdin_str,
+    });
+
+    let payload_str = payload.to_string();
+    stream.write_all(payload_str.as_bytes())?;
+    stream.write_all(b"\n")?;
+
+    let mut stream_clone = stream.try_clone()?;
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let stdin = std::io::stdin();
+        for line in stdin.lock().lines() {
+            if let Ok(line) = line {
+                let _ = stream_clone.write_all(line.as_bytes());
+                let _ = stream_clone.write_all(b"\n");
+            }
+        }
+    });
+
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    print!("{}", response);
+    Ok(())
+}
+
+fn run_daemon(socket_path: &str) {
+    use std::io::{Write, BufRead};
+    let _ = std::fs::remove_file(socket_path);
+    let listener = match std::os::unix::net::UnixListener::bind(socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind to socket {}: {}", socket_path, e);
+            std::process::exit(1);
+        }
+    };
+
+    log::info!("cce-cloud daemon started, listening on {}", socket_path);
+
+    let conn = Connection::connect_to_env().unwrap();
+    let conn_clone = conn.clone();
+    let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
+    let qh = event_queue.handle();
+
+    let compositor_state = CompositorState::bind(&globals, &qh).unwrap();
+    let layer_shell_state = LayerShell::bind(&globals, &qh).unwrap();
+    let shm_state = Shm::bind(&globals, &qh).unwrap();
+    let seat_state = SeatState::new(&globals, &qh);
+    let output_state = OutputState::new(&globals, &qh);
+    let cce_wm = globals.bind::<cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1, _, _>(&qh, 2..=4, ()).ok();
+
+    let mut app = AppState {
+        registry_state: RegistryState::new(&globals),
+        compositor_state,
+        layer_shell_state,
+        shm_state,
+        seat_state,
+        output_state,
+        seats: Vec::new(),
+        pointer: None,
+        keyboard: None,
+        window: None,
+        surface: None,
+        state: None,
+        exit: false,
+        redraw: false,
+        ctrl_pressed: false,
+        super_pressed: false,
+        switcher_mode: false,
+        fade_out: false,
+        fade_start: None,
+        fade_factor: 1.0,
+        cce_toplevel: None,
+        selected_item: None,
+    };
+
+    event_queue.roundtrip(&mut app).unwrap();
+
+    let scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
+    let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
+
+    let mut event_loop = calloop::EventLoop::try_new().unwrap();
+    let loop_handle = event_loop.handle();
+    WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
+
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
+
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut initial_line = String::new();
+        if reader.read_line(&mut initial_line).is_err() {
+            continue;
+        }
+
+        let payload: serde_json::Value = match serde_json::from_str(&initial_line) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        let client_args: Vec<String> = payload["args"].as_array()
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+            .unwrap_or_default();
+        let initial_stdin = payload["initial_stdin"].as_str().unwrap_or("").to_string();
+
+        let mut prompt = "Search: ".to_string();
+        let mut mode = if !initial_stdin.is_empty() {
+            LauncherMode::Dmenu
+        } else {
+            LauncherMode::Path
+        };
+        let mut x_pos: Option<i32> = None;
+        let mut y_pos: Option<i32> = None;
+        let mut select_item: Option<String> = None;
+        let mut align_right = false;
+        let mut switcher_mode = false;
+        let mut parent_app_id: Option<String> = None;
+
+        let mut i = 1;
+        while i < client_args.len() {
+            let arg = &client_args[i];
+            if arg == "-p" || arg == "--prompt" {
+                if i + 1 < client_args.len() {
+                    prompt = client_args[i + 1].clone();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if arg == "-s" || arg == "--select" {
+                if i + 1 < client_args.len() {
+                    select_item = Some(client_args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if arg == "-x" || arg == "--x-pos" {
+                if i + 1 < client_args.len() {
+                    if let Ok(val) = client_args[i + 1].parse::<i32>() {
+                        x_pos = Some(val);
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if arg == "-y" || arg == "--y-pos" {
+                if i + 1 < client_args.len() {
+                    if let Ok(val) = client_args[i + 1].parse::<i32>() {
+                        y_pos = Some(val);
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if arg == "--parent-app-id" {
+                if i + 1 < client_args.len() {
+                    parent_app_id = Some(client_args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if arg == "--mode" {
+                if i + 1 < client_args.len() {
+                    let m = &client_args[i + 1];
+                    match m.as_str() {
+                        "apps" | "app" => mode = LauncherMode::Apps,
+                        "path" => mode = LauncherMode::Path,
+                        "dmenu" => mode = LauncherMode::Dmenu,
+                        _ => eprintln!("Unknown mode: {}", m),
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            } else if arg == "--apps" || arg == "--app" {
+                mode = LauncherMode::Apps;
+                i += 1;
+            } else if arg == "--path" {
+                mode = LauncherMode::Path;
+                i += 1;
+            } else if arg == "--dmenu" {
+                mode = LauncherMode::Dmenu;
+                i += 1;
+            } else if arg == "--json" || arg == "--layout" {
+                mode = LauncherMode::Json;
+                i += 1;
+            } else if arg == "--align-right" {
+                align_right = true;
+                i += 1;
+            } else if arg == "--switcher" {
+                switcher_mode = true;
+                mode = LauncherMode::Dmenu;
+                i += 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        let mut json_layout_config: Option<JsonLayoutConfig> = None;
+        if mode == LauncherMode::Json {
+            match serde_json::from_str::<JsonLayoutConfig>(&initial_stdin) {
+                Ok(cfg) => {
+                    json_layout_config = Some(cfg);
+                }
+                Err(e) => {
+                    let _ = stream.write_all(format!("Failed to parse JSON layout: {}\n", e).as_bytes());
+                    continue;
+                }
+            }
+        }
+
+        let use_xdg = cce_wm.is_some() && xdg_shell_state.is_some() && x_pos.is_none() && y_pos.is_none();
+
+        let mut initial_items = Vec::new();
+        if mode == LauncherMode::Dmenu {
+            for line in initial_stdin.lines() {
+                initial_items.push(line.to_string());
+            }
+        }
+
+        let stdin_state = Arc::new(std::sync::Mutex::new(StdinState {
+            items: initial_items,
+            new_data: !initial_stdin.is_empty(),
+            cycle_next: 0,
+            select_and_close: false,
+        }));
+
+        let stdin_state_clone = stdin_state.clone();
+        let stdin_sender_clone = stdin_sender.clone();
+        let mut reader_clone = stream.try_clone().unwrap();
+        let thread_handle = std::thread::spawn(move || {
+            let mut line = String::new();
+            let mut buf_reader = std::io::BufReader::new(&mut reader_clone);
+            while let Ok(n) = buf_reader.read_line(&mut line) {
+                if n == 0 {
+                    break;
+                }
+                let trimmed = line.trim_end_matches('\n');
+                if let Ok(mut lock_state) = stdin_state_clone.lock() {
+                    if trimmed == "__cce_switcher_next__" {
+                        lock_state.cycle_next += 1;
+                        lock_state.new_data = true;
+                    } else if trimmed == "__cce_switcher_select_and_close__" {
+                        lock_state.select_and_close = true;
+                        lock_state.new_data = true;
+                    } else {
+                        lock_state.items.push(trimmed.to_string());
+                        lock_state.new_data = true;
+                    }
+                }
+                let _ = stdin_sender_clone.send(());
+                line.clear();
+            }
+        });
+
+        let stdin_state_for_handler = stdin_state.clone();
+        let registration_token = loop_handle.insert_source(stdin_channel, move |event, _metadata, app_state: &mut AppState| {
+            if let calloop::channel::Event::Msg(()) = event {
+                let mut select_and_close = false;
+                if let Some(st) = &mut app_state.state {
+                    if let (Ok(mut lock_daemon), Ok(mut lock_state)) = (stdin_state_for_handler.lock(), st.stdin_state.lock()) {
+                        if lock_daemon.new_data {
+                            lock_state.items = lock_daemon.items.clone();
+                            lock_state.cycle_next = lock_daemon.cycle_next;
+                            lock_state.select_and_close = lock_daemon.select_and_close;
+                            lock_state.new_data = true;
+                            lock_daemon.new_data = false;
+                        }
+                    }
+                    if st.check_stdin_updates() {
+                        st.update_desired_size();
+                        st.apply_layout();
+                        st.upload_vertices();
+                        app_state.redraw = true;
+                    }
+                    if st.select_and_close_requested {
+                        st.select_and_close_requested = false;
+                        select_and_close = true;
+                    }
+                }
+                if select_and_close {
+                    app_state.trigger_select_and_close();
+                }
+            }
+        }).unwrap();
+
+        app.super_pressed = switcher_mode;
+        app.switcher_mode = switcher_mode;
+        app.selected_item = None;
+
+        let (state, cce_toplevel) = pollster::block_on(State::new(
+            &conn_clone,
+            &qh,
+            &app.compositor_state,
+            &app.layer_shell_state,
+            xdg_shell_state.as_ref(),
+            cce_wm.as_ref(),
+            use_xdg,
+            prompt,
+            stdin_sender.clone(),
+            mode,
+            x_pos,
+            y_pos,
+            align_right,
+            scale,
+            select_item,
+            switcher_mode,
+            json_layout_config,
+            parent_app_id,
+        ));
+
+        if let Some(ref mut st) = app.state {
+            st.stdin_state = stdin_state.clone();
+        }
+        app.window = Some(state.window.clone());
+        app.surface = Some(state.wl_surface.clone());
+        app.cce_toplevel = cce_toplevel;
+        app.state = Some(state);
+
+        app.exit = false;
+        app.fade_out = false;
+        app.fade_start = None;
+        app.fade_factor = 1.0;
+
+        let mut last_tick = std::time::Instant::now();
+        while !app.exit {
+            if app.fade_out {
+                if let Some(start) = app.fade_start {
+                    let elapsed = start.elapsed().as_secs_f32();
+                    app.fade_factor = (1.0 - elapsed / 0.15).max(0.0);
+                    if app.fade_factor <= 0.0 {
+                        app.exit = true;
+                    } else {
+                        app.redraw = true;
+                    }
+                }
+            }
+
+            let timeout = if app.redraw {
+                std::time::Duration::from_millis(0)
+            } else {
+                std::time::Duration::from_millis(16)
+            };
+            event_loop.dispatch(timeout, &mut app).unwrap();
+
+            if app.exit {
+                break;
+            }
+
+            let now = std::time::Instant::now();
+            let mut dt = now.duration_since(last_tick).as_secs_f32();
+            last_tick = now;
+            if dt > 0.1 {
+                dt = 0.1;
+            }
+            if let Some(st) = &mut app.state {
+                if let Some(jl) = &mut st.json_layout {
+                    if jl.tick(dt, &mut st.ui_context) {
+                        app.redraw = true;
+                    }
+                }
+            }
+
+            if app.redraw {
+                app.redraw = false;
+                if let Some(st) = &mut app.state {
+                    let _ = st.render(app.fade_factor);
+                }
+            }
+        }
+
+        loop_handle.remove(registration_token);
+        let _ = stream.shutdown(std::net::Shutdown::Read);
+        let _ = thread_handle.join();
+
+        let response = app.selected_item.take().unwrap_or_default();
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.write_all(b"\n");
+        let _ = stream.flush();
+
+        if let Some(st) = &mut app.state {
+            match &st.window {
+                AppWindow::Layer(layer) => layer.set_keyboard_interactivity(KeyboardInteractivity::None),
+                AppWindow::Xdg(_) => {}
+            }
+            st.wl_surface.commit();
+        }
+        app.window = None;
+        app.surface = None;
+        app.state = None;
+        app.cce_toplevel = None;
+    }
+}
+
+fn main() {
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
+
+    let args = std::env::args().collect::<Vec<String>>();
+    let is_daemon = args.iter().any(|arg| arg == "--daemon");
+
+    let uid = unsafe { libc::getuid() };
+    let socket_dir = format!("/run/user/{}", uid);
+    let socket_path = if std::path::Path::new(&socket_dir).exists() {
+        format!("{}/cce-cloud.socket", socket_dir)
+    } else {
+        format!("/tmp/cce-cloud-{}.socket", uid)
+    };
+
+    if is_daemon {
+        run_daemon(&socket_path);
+    } else {
+        match run_client(&socket_path, &args) {
+            Ok(_) => {}
+            Err(e) => {
+                log::warn!("Could not connect to cce-cloud daemon: {}. Running in standalone mode.", e);
+                run_standalone();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
