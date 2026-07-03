@@ -806,6 +806,7 @@ impl State {
         select_item: Option<String>,
         switcher_mode: bool,
         json_layout_config: Option<JsonLayoutConfig>,
+        parent_app_id: Option<String>,
     ) -> (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>) {
         cce_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Json {
@@ -895,7 +896,11 @@ impl State {
 
         let wl_surface = compositor_state.create_surface(qh);
         wl_surface.set_buffer_scale(scale as i32);
-        let app_id = "cce-cloud".to_string();
+        let app_id = if let Some(ref parent) = parent_app_id {
+            format!("cce-cloud:{}", parent)
+        } else {
+            "cce-cloud".to_string()
+        };
 
         let mut cce_toplevel = None;
         let window = if use_xdg {
@@ -2273,6 +2278,7 @@ fn main() {
     let mut select_item: Option<String> = None;
     let mut align_right = false;
     let mut switcher_mode = false;
+    let mut parent_app_id: Option<String> = None;
 
     let args = std::env::args().skip(1).collect::<Vec<String>>();
     let mut i = 0;
@@ -2306,6 +2312,13 @@ fn main() {
                 if let Ok(val) = args[i + 1].parse::<i32>() {
                     y_pos = Some(val);
                 }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if arg == "--parent-app-id" {
+            if i + 1 < args.len() {
+                parent_app_id = Some(args[i + 1].clone());
                 i += 2;
             } else {
                 i += 1;
@@ -2436,6 +2449,7 @@ fn main() {
         select_item,
         switcher_mode,
         json_layout_config,
+        parent_app_id,
     ));
 
     app.window = Some(state.window.clone());
