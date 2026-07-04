@@ -2566,10 +2566,55 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
     use std::io::{Read, Write};
     let mut stream = std::os::unix::net::UnixStream::connect(socket_path)?;
 
+    let mut needs_stdin = false;
+    let mut mode_specified = false;
+    let mut i = 1;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--mode" {
+            if i + 1 < args.len() {
+                let m = &args[i + 1];
+                match m.as_str() {
+                    "apps" | "app" | "path" => {
+                        needs_stdin = false;
+                        mode_specified = true;
+                    }
+                    "dmenu" | "json" => {
+                        needs_stdin = true;
+                        mode_specified = true;
+                    }
+                    _ => {}
+                }
+                i += 2;
+            } else {
+                i += 1;
+            }
+        } else if arg == "--apps" || arg == "--app" || arg == "--path" {
+            needs_stdin = false;
+            mode_specified = true;
+            i += 1;
+        } else if arg == "--dmenu" || arg == "--json" || arg == "--layout" {
+            needs_stdin = true;
+            mode_specified = true;
+            i += 1;
+        } else if arg == "--switcher" {
+            needs_stdin = true;
+            mode_specified = true;
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
+    if !mode_specified {
+        needs_stdin = !std::io::stdin().is_terminal();
+    }
+
     let mut stdin_str = String::new();
-    if !std::io::stdin().is_terminal() {
+    if needs_stdin {
         std::io::stdin().read_to_string(&mut stdin_str)?;
     }
+
 
     let payload = serde_json::json!({
         "args": args,
