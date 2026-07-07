@@ -42,49 +42,8 @@ use glyphon::{
     TextBounds, TextRenderer, Viewport,
 };
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-pub(crate) struct Vertex {
-    position: [f32; 2],
-    color: [f32; 4],
-    clip_circle: [f32; 3],
-}
-
-impl Vertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
-        0 => Float32x2,
-        1 => Float32x4,
-        2 => Float32x3,
-    ];
-
-    fn desc() -> wgpu::VertexBufferLayout<'static> {
-        wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &Self::ATTRIBS,
-        }
-    }
-}
-
-fn quad_vertices(
-    x: f32, y: f32, w: f32, h: f32,
-    surface_w: f32, surface_h: f32,
-    color: [f32; 4],
-) -> [Vertex; 6] {
-    let x0 = (x / surface_w) * 2.0 - 1.0;
-    let y0 = 1.0 - (y / surface_h) * 2.0;
-    let x1 = ((x + w) / surface_w) * 2.0 - 1.0;
-    let y1 = 1.0 - ((y + h) / surface_h) * 2.0;
-
-    [
-        Vertex { position: [x0, y0], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y0], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x1, y1], color, clip_circle: [0.0; 3] },
-        Vertex { position: [x0, y1], color, clip_circle: [0.0; 3] },
-    ]
-}
+// Vertex and quad_vertices are shared from the cce-ui engine.
+pub(crate) use cce_ui::engine::{quad_vertices, Vertex};
 
 fn rounded_rect_vertices_corners(
     x: f32, y: f32, ww: f32, h: f32,
@@ -178,7 +137,7 @@ fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
 fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buffer {
     let metrics = Metrics::new(size, size * 1.4);
     let mut buffer = Buffer::new(font_system, metrics);
-    let font_family = cce_ui::layout::button_font_parsed().0;
+    let font_family = cce_ui::layout::control_label_font_parsed().0;
     let attrs = Attrs::new().family(glyphon::Family::Name(&font_family));
     buffer.set_text(font_system, text, attrs, glyphon::Shaping::Advanced);
     buffer.shape_until_scroll(font_system, true);
