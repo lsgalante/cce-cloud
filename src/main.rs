@@ -1828,11 +1828,11 @@ impl PointerHandler for AppState {
                                         changed = true;
                                     }
                                     for w in &mut jl.widgets {
-                                        if let Some(btn) = w.widget.as_any_mut().downcast_mut::<cce_ui::widget::Button>() {
-                                            if btn.take_click() {
-                                                clicked_btn_id = Some(w.id.clone());
-                                                break;
-                                            }
+                                        // take_click is an Element method; Phase 5 Buttons are
+                                        // Adapted, so ask the box directly.
+                                        if w.widget_type == "button" && w.widget.take_click() {
+                                            clicked_btn_id = Some(w.id.clone());
+                                            break;
                                         }
                                     }
                                 }
@@ -3158,7 +3158,8 @@ mod tests {
         // Simulate hover on button
         let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0, &mut ctx);
         assert!(changed_hover);
-        assert!(layout.widgets[2].widget.as_any().downcast_ref::<cce_ui::widget::Button>().unwrap().base().unwrap().hovered);
+        // Phase 5: hover state lives on the Button model (it drives the color matrix), not the base.
+        assert!(layout.widgets[2].widget.as_any().downcast_ref::<cce_ui::widget::Button>().unwrap().hovered());
     }
 
     #[test]
