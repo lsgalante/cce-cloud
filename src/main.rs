@@ -549,6 +549,15 @@ impl FuzzelWidget {
 }
 
 impl Element for FuzzelWidget {
+    // Leaf legacy widget: own labels via paint_self (cce-ui's default no longer drains
+    // the text getters; walk_text_labels reads the walk).
+    fn paint_self(&self, ui: &cce_ui::context::UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
+        cce_ui::scene::painter::paint_legacy_leaf(
+            self, ui, ctx,
+            cce_ui::scene::painter::fonted_leaf_labels(self, ui, self.own_labels()),
+        );
+    }
+
     fn rect(&self) -> (f32, f32, f32, f32) {
         (self.x, self.y, self.w, self.h)
     }
@@ -618,63 +627,6 @@ impl Element for FuzzelWidget {
         quads
     }
 
-    fn text_labels(&self) -> Vec<TextLabel> {
-        let mut labels = Vec::new();
-        let pad = 15.0;
-        let search_h = 35.0;
-
-        let query_text = if self.query.is_empty() {
-            format!("{}{}", self.prompt, "Type to search...")
-        } else {
-            format!("{}{}", self.prompt, self.query)
-        };
-        let query_color = if self.query.is_empty() {
-            [0x66, 0x66, 0x77]
-        } else {
-            [0xcc, 0xff, 0xcc]
-        };
-
-        labels.push(TextLabel {
-            text: query_text,
-            x: self.x + pad + 10.0,
-            y: self.y + pad + 9.0,
-            font_size: 14.0,
-            color: query_color,
-        });
-
-        let item_h = 25.0;
-        for (idx, item_text) in self.filtered_items.iter().enumerate() {
-            let virtual_y = idx as f32 * item_h;
-            if let Some(draw_y) = self.scroll_box.get_item_draw_y(virtual_y, item_h) {
-                let color = if idx == self.selected {
-                    [0xff, 0xff, 0xff]
-                } else {
-                    [0xbb, 0xbb, 0xc5]
-                };
-
-                labels.push(TextLabel {
-                    text: item_text.clone(),
-                    x: self.x + pad + 10.0,
-                    y: draw_y + 4.0,
-                    font_size: 13.0,
-                    color,
-                });
-            }
-        }
-
-        if self.filtered_items.is_empty() {
-            let list_y = self.y + pad + search_h + 10.0;
-            labels.push(TextLabel {
-                text: "No matches found".to_string(),
-                x: self.x + pad + 10.0,
-                y: list_y + 4.0,
-                font_size: 13.0,
-                color: [0x88, 0x88, 0x99],
-            });
-        }
-
-        labels
-    }
 
     fn mouse_input(&mut self, button: cce_ui::widget::MouseButton, state: cce_ui::widget::ElementState, px: f32, py: f32, ctx: &mut cce_ui::context::UiContext) -> bool {
         if button == cce_ui::widget::MouseButton::Left && state == cce_ui::widget::ElementState::Pressed {
@@ -3261,3 +3213,62 @@ mod tests {
     }
 }
 
+impl FuzzelWidget {
+    fn own_labels(&self) -> Vec<TextLabel> {
+        let mut labels = Vec::new();
+        let pad = 15.0;
+        let search_h = 35.0;
+
+        let query_text = if self.query.is_empty() {
+            format!("{}{}", self.prompt, "Type to search...")
+        } else {
+            format!("{}{}", self.prompt, self.query)
+        };
+        let query_color = if self.query.is_empty() {
+            [0x66, 0x66, 0x77]
+        } else {
+            [0xcc, 0xff, 0xcc]
+        };
+
+        labels.push(TextLabel {
+            text: query_text,
+            x: self.x + pad + 10.0,
+            y: self.y + pad + 9.0,
+            font_size: 14.0,
+            color: query_color,
+        });
+
+        let item_h = 25.0;
+        for (idx, item_text) in self.filtered_items.iter().enumerate() {
+            let virtual_y = idx as f32 * item_h;
+            if let Some(draw_y) = self.scroll_box.get_item_draw_y(virtual_y, item_h) {
+                let color = if idx == self.selected {
+                    [0xff, 0xff, 0xff]
+                } else {
+                    [0xbb, 0xbb, 0xc5]
+                };
+
+                labels.push(TextLabel {
+                    text: item_text.clone(),
+                    x: self.x + pad + 10.0,
+                    y: draw_y + 4.0,
+                    font_size: 13.0,
+                    color,
+                });
+            }
+        }
+
+        if self.filtered_items.is_empty() {
+            let list_y = self.y + pad + search_h + 10.0;
+            labels.push(TextLabel {
+                text: "No matches found".to_string(),
+                x: self.x + pad + 10.0,
+                y: list_y + 4.0,
+                font_size: 13.0,
+                color: [0x88, 0x88, 0x99],
+            });
+        }
+
+        labels
+    }
+}
