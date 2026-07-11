@@ -144,6 +144,24 @@ fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buff
     buffer
 }
 
+/// A widget subtree's text via the paint walk (not the legacy text_labels getter),
+/// reduced to the plain labels this renderer shapes: the buffer font and window bounds
+/// stay exactly as before (make_text_buffer applies the control font to every label).
+fn walk_text_labels(ui: &cce_ui::context::UiContext, w: &dyn Element) -> Vec<TextLabel> {
+    let mut pc = cce_ui::scene::paint::PaintCtx::new();
+    cce_ui::scene::painter::append_widget_text(ui, w, &mut pc);
+    pc.finish()
+        .items
+        .into_iter()
+        .filter_map(|item| match item.prim {
+            cce_ui::scene::paint::Prim::Text { text, x, y, font_size, color, .. } => {
+                Some(TextLabel { text, x, y, font_size, color })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn filter_and_sort_items(items: &[String], query: &str) -> Vec<String> {
     if query.is_empty() {
         return items.to_vec();
@@ -1377,6 +1395,7 @@ impl State {
             ref fuzzel,
             ref json_layout,
             ref mode,
+            ref ui_context,
             ..
         } = self;
 
@@ -1392,14 +1411,10 @@ impl State {
         let is_json_mode = *mode == LauncherMode::Json;
         if is_json_mode {
             if let Some(jl) = json_layout {
-                for label in jl.text_labels() {
-                    widget_labels.push(label);
-                }
+                widget_labels.extend(walk_text_labels(ui_context, jl));
             }
         } else {
-            for label in fuzzel.text_labels() {
-                widget_labels.push(label);
-            }
+            widget_labels.extend(walk_text_labels(ui_context, fuzzel));
         }
 
         for label in &widget_labels {
