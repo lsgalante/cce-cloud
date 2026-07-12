@@ -8,7 +8,7 @@ use cce_ui::widget::{Element, TextLabel};
 use crate::json_layout::{JsonLayoutWidget, JsonLayoutConfig};
 mod json_layout;
 #[cfg(test)]
-use cce_ui::widget::JsonWidgetConfig;
+use crate::json_layout::JsonWidgetConfig;
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -698,7 +698,7 @@ struct State {
     vertex_count: u32,
 
     fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
-    json_layout: Option<JsonLayoutWidget>,
+    json_layout: Option<cce_ui::widget::Adapted<JsonLayoutWidget>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,

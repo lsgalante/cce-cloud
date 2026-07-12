@@ -1,8 +1,8 @@
 //! App-owned copy of the dissolved cce-ui `JsonLayoutWidget` (Phase 6ay): cloud is the
-//! only consumer — the KDL/JSON-driven launcher layout host (`LauncherMode::Json`). It
-//! still implements `Element` because the paint walk (`append_widget_text`) descends it;
-//! the impl dies with the machinery retype. `Justification` stayed in cce-ui (Button,
-//! cce-files, and settings share it).
+//! only consumer — the KDL/JSON-driven launcher layout host (`LauncherMode::Json`),
+//! on the narrow traits wrapped in `Adapted<JsonLayoutWidget>` (Phase 6az): the paint
+//! walk reaches it as the adapter, whose subtree text pass-through forwards `paint`'s
+//! prims verbatim. `Justification` stayed in cce-ui (Button, cce-files, settings).
 
 use cce_ui::widget::{
     Element, Widget, Checkbox, Button, Label, Spinbox, ColorSelector, TextLabel, MouseButton, ElementState, Slider, Event, UiContext,
@@ -69,7 +69,7 @@ pub struct JsonLayoutWidget {
 }
 
 impl JsonLayoutWidget {
-    pub fn new(config: &JsonLayoutConfig) -> Self {
+    pub fn new(config: &JsonLayoutConfig) -> cce_ui::widget::Adapted<JsonLayoutWidget> {
         let mut widgets = Vec::new();
         let mut page_titles = Vec::new();
 
@@ -220,14 +220,14 @@ impl JsonLayoutWidget {
             }
         }
 
-        Self {
+        cce_ui::widget::Adapted::new(Self {
             base: Widget::new(),
             widgets,
             dragging_slider_idx: None,
             page_scroll_y: vec![0.0; 16],
             page_total_heights: vec![0.0; 16],
             active_page: 0,
-        }
+        })
     }
 
     pub fn layout_children(&mut self) {
@@ -290,50 +290,17 @@ impl JsonLayoutWidget {
     }
 }
 
-impl Element for JsonLayoutWidget {
-    fn is_scrollable(&self) -> bool { true }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
-        self as *const Self as *mut Self as *mut (dyn Element + 'static)
-    }
-    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
-        self as *mut Self as *mut (dyn Element + 'static)
+impl JsonLayoutWidget {
+    /// The laid-out rect, mirrored from the adapter by `Layout::rect_assigned`.
+    fn rect(&self) -> (f32, f32, f32, f32) {
+        (self.base.x, self.base.y, self.base.w, self.base.h)
     }
 
-    fn base(&self) -> Option<&Widget> { Some(&self.base) }
-    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
-    fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] }
-
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        if let Some(b) = self.base_mut() {
-            b.x = x;
-            b.y = y;
-            b.w = w;
-            b.h = h;
-        }
-        self.layout_children();
-    }
-
-    fn tick(&mut self, dt: f32, ctx: &mut UiContext) -> bool {
-        let mut changed = false;
-        let active_page = self.active_page;
-        for w in &mut self.widgets {
-            if w.page_idx != active_page {
-                continue;
-            }
-            if w.widget.tick(dt, ctx) {
-                changed = true;
-            }
-        }
-        changed
-    }
-
-    fn wants_tick(&self) -> bool {
-        true
-    }
-
-    fn all_quads(&self, ctx: &UiContext) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
+    /// The page-filtered plain-quad aggregate (the old `Element::all_quads` override):
+    /// active-page children's backgrounds, decoration quads, and highlight, clipped to
+    /// the content area. External readers reach it through the adapter's reverse bridge
+    /// (`jl.all_quads(ctx)` serves `paint`'s plain prims, which come from here).
+    fn aggregate_quads(&self, ctx: &UiContext) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
         let mut quads = Vec::new();
 
         let active_page = self.active_page;
@@ -378,7 +345,26 @@ impl Element for JsonLayoutWidget {
         quads
     }
 
-    fn handle_event(&mut self, event: &Event, ctx: &mut UiContext) -> bool {
+    /// Per-frame child state (the old `Element::tick` override): active-page widgets only.
+    fn tick_children(&mut self, dt: f32, ctx: &mut UiContext) -> bool {
+        let mut changed = false;
+        let active_page = self.active_page;
+        for w in &mut self.widgets {
+            if w.page_idx != active_page {
+                continue;
+            }
+            if w.widget.tick(dt, ctx) {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// The whole-subtree event routing (the old `Element::handle_event` override,
+    /// verbatim). Every press reaches it (`Input::gates_presses` is off), matching the
+    /// ungated legacy direct-dispatch path — the trailing focus-clear on a missed press
+    /// depends on that.
+    fn route_event(&mut self, event: &Event, ctx: &mut UiContext) -> bool {
         let mut changed = false;
 
         match event {
@@ -553,44 +539,63 @@ impl Element for JsonLayoutWidget {
 
         changed
     }
+}
 
-    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32, ctx: &mut UiContext) -> bool {
-        self.handle_event(&Event::MouseButton { button, state, x: px, y: py, local_x: px, local_y: py }, ctx)
+impl cce_ui::widget::Layout for JsonLayoutWidget {
+    // The old `set_rect` override: land the rect in the model, then place the children.
+    fn rect_assigned(&mut self, rect: cce_ui::scene::layout::Rect) {
+        self.base.x = rect.x;
+        self.base.y = rect.y;
+        self.base.w = rect.width;
+        self.base.h = rect.height;
+        self.layout_children();
     }
+}
 
-    fn on_cursor_moved(&mut self, px: f32, py: f32, ctx: &mut UiContext) -> bool {
-        self.handle_event(&Event::PointerMove { x: px, y: py, local_x: px, local_y: py }, ctx)
-    }
+impl cce_ui::widget::Paint for JsonLayoutWidget {
+    fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] }
 
-    fn children(&self, _ctx: &UiContext) -> Vec<*mut (dyn Element + 'static)> {
-        self.widgets.iter().map(|w| w.widget.as_ptr()).collect()
-    }
+    // JsonLayout paints its whole subtree: page-filtered aggregates plus the checkbox
+    // side-labels that belong to the container, not to any child widget. The paint walk
+    // emits these once and does not descend (descending would draw inactive pages and
+    // miss the side-labels); the adapter forwards the Text prims verbatim, bounds included.
+    fn paints_own_subtree(&self) -> bool { true }
 
-    // JsonLayout renders its whole subtree itself: page-filtered aggregates plus the
-    // checkbox side-labels that belong to the container, not to any child widget. The
-    // paint walk must emit these once and not descend (descending would draw inactive
-    // pages' widgets and miss the side-labels).
-    fn renders_own_subtree(&self) -> bool {
-        true
-    }
-
-    fn paint_self(&self, ui: &UiContext, pc: &mut cce_ui::scene::paint::PaintCtx) {
+    fn paint(&self, _rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
         use cce_ui::scene::layout::Rect;
-        for (x, y, w, h, r, c, corners) in self.all_rounded_quads(ui) {
-            pc.rounded_rect(Rect { x, y, width: w, height: h }, r, corners, c);
+        // The children are Phase 5 Adapted leaves: nothing their all_* getters or the
+        // label walk reads comes from the routing context, so a fresh one stands in for
+        // the ctx `Paint::paint` does not carry.
+        let dummy = UiContext::new();
+        // Rounded: the deleted Element default's shape — no own background (transparent,
+        // sharp corners), every child unfiltered, in `widgets` order.
+        for w in &self.widgets {
+            for (x, y, qw, qh, r, c, corners) in w.widget.all_rounded_quads(&dummy) {
+                pc.rounded_rect(Rect { x, y, width: qw, height: qh }, r, corners, c);
+            }
         }
-        for (x, y, w, h, c) in self.all_quads(ui) {
+        for (x, y, w, h, c) in self.aggregate_quads(&dummy) {
             pc.quad(Rect { x, y, width: w, height: h }, c);
         }
-        for (cx, cy, r, t, s, e, c) in self.extra_arcs() {
-            pc.arc(cx, cy, r, t, s, e, c);
-        }
-        for (cx, cy, r, c) in self.extra_circles() {
-            pc.circle(cx, cy, r, c);
-        }
-        for (tl, bounds) in self.own_labels_with_bounds(ui) {
+        for (tl, bounds) in self.own_labels_with_bounds(&dummy) {
             pc.text_with(tl.text, tl.x, tl.y, tl.font_size, tl.color, None, bounds);
         }
+    }
+}
+
+impl cce_ui::widget::Input for JsonLayoutWidget {
+    fn scrollable(&self) -> bool { true }
+    fn wants_tick(&self) -> bool { true }
+    fn gates_presses(&self) -> bool { false }
+
+    fn on_event(&mut self, event: &Event, ectx: &mut cce_ui::widget::EventCtx) -> bool {
+        let Some(ctx) = ectx.ui.as_deref_mut() else { return false };
+        self.route_event(event, ctx)
+    }
+
+    fn tick_ctx(&mut self, dt: f32, ectx: &mut cce_ui::widget::EventCtx) -> bool {
+        let Some(ctx) = ectx.ui.as_deref_mut() else { return false };
+        self.tick_children(dt, ctx)
     }
 }
 
