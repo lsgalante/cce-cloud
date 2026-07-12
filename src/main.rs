@@ -4,7 +4,9 @@ use scroll_region::ScrollRegion;
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
-use cce_ui::widget::{Element, TextLabel, JsonLayoutWidget, JsonLayoutConfig};
+use cce_ui::widget::{Element, TextLabel};
+use crate::json_layout::{JsonLayoutWidget, JsonLayoutConfig};
+mod json_layout;
 #[cfg(test)]
 use cce_ui::widget::JsonWidgetConfig;
 

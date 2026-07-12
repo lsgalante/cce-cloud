@@ -1,0 +1,640 @@
+//! App-owned copy of the dissolved cce-ui `JsonLayoutWidget` (Phase 6ay): cloud is the
+//! only consumer — the KDL/JSON-driven launcher layout host (`LauncherMode::Json`). It
+//! still implements `Element` because the paint walk (`append_widget_text`) descends it;
+//! the impl dies with the machinery retype. `Justification` stayed in cce-ui (Button,
+//! cce-files, and settings share it).
+
+use cce_ui::widget::{
+    Element, Widget, Checkbox, Button, Label, Spinbox, ColorSelector, TextLabel, MouseButton, ElementState, Slider, Event, UiContext,
+    Key, NamedKey, Justification,
+};
+use serde::Deserialize;
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct JsonWidgetConfig {
+    #[serde(rename = "type")]
+    pub widget_type: String,
+    pub text: String,
+    pub id: Option<String>,
+    pub checked: Option<bool>,
+    pub value: Option<i32>,
+    pub min: Option<i32>,
+    pub max: Option<i32>,
+    pub step: Option<i32>,
+    pub decimals: Option<u32>,
+    pub color: Option<[u8; 3]>,
+    pub value_f32: Option<f32>,
+    pub min_f32: Option<f32>,
+    pub max_f32: Option<f32>,
+    pub target_page: Option<usize>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct JsonPageConfig {
+    pub title: String,
+    pub widgets: Vec<JsonWidgetConfig>,
+    pub justify: Option<Justification>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct JsonLayoutConfig {
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub widgets: Option<Vec<JsonWidgetConfig>>,
+    pub pages: Option<Vec<JsonPageConfig>>,
+    pub justify: Option<Justification>,
+}
+
+pub struct JsonWidget {
+    pub id: String,
+    pub widget_type: String,
+    pub text: String,
+    pub widget: Box<dyn Element>,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub label_text: Option<TextLabel>,
+    pub page_idx: usize,
+    pub target_page: Option<usize>,
+}
+
+pub struct JsonLayoutWidget {
+    base: Widget,
+    pub widgets: Vec<JsonWidget>,
+    pub dragging_slider_idx: Option<usize>,
+    pub page_scroll_y: Vec<f32>,
+    pub page_total_heights: Vec<f32>,
+    pub active_page: usize,
+}
+
+impl JsonLayoutWidget {
+    pub fn new(config: &JsonLayoutConfig) -> Self {
+        let mut widgets = Vec::new();
+        let mut page_titles = Vec::new();
+
+        if let Some(ref pages_conf) = config.pages {
+            for (page_idx, page) in pages_conf.iter().enumerate() {
+                page_titles.push(page.title.clone());
+                let page_justify = page.justify.unwrap_or(Justification::Center);
+                for (idx, w_conf) in page.widgets.iter().enumerate() {
+                    let id = w_conf.id.clone().unwrap_or_else(|| format!("widget_{}_{}", page_idx, idx));
+                    let widget_type = w_conf.widget_type.clone();
+                    let text = w_conf.text.clone();
+
+                    let widget: Box<dyn Element> = match widget_type.as_str() {
+                        "checkbox" => {
+                            let mut cb = Checkbox::new();
+                            if let Some(ch) = w_conf.checked {
+                                cb.set_checked(ch);
+                            }
+                            Box::new(cb)
+                        }
+                        "button" => {
+                            Box::new(Button::new(0.0, 0.0, 0.0, 0.0)
+                                .with_label(&text)
+                                .with_justify(page_justify)
+                                .with_bg([0.0, 0.0, 0.0, 0.0])
+                                .with_hover_bg([0.20, 0.35, 0.65, 0.9]))
+                        }
+                        "label" => {
+                            Box::new(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
+                        }
+                        "spinbox" => {
+                            let min_val = w_conf.min.unwrap_or(0);
+                            let max_val = w_conf.max.unwrap_or(100);
+                            let step_val = w_conf.step.unwrap_or(1);
+                            let mut sb = Spinbox::new(w_conf.value.unwrap_or(0), min_val, max_val, step_val)
+                                .with_label(&text);
+                            if let Some(dec) = w_conf.decimals {
+                                sb = sb.with_decimals(dec);
+                            }
+                            Box::new(sb)
+                        }
+                        "color" | "rgb" | "rgba" => {
+                            let col = w_conf.color.unwrap_or([255, 255, 255]);
+                            let cs = ColorSelector::new(col).with_label(&text);
+                            Box::new(cs)
+                        }
+                        "slider" => {
+                            let min_val = w_conf.min_f32.unwrap_or(0.0);
+                            let max_val = w_conf.max_f32.unwrap_or(1.0);
+                            let mut sl = Slider::new()
+                                .with_range(min_val, max_val)
+                                .with_label(&text)
+                                .with_readout(true);
+                            if let Some(val) = w_conf.value_f32 {
+                                let pct = if max_val > min_val { (val - min_val) / (max_val - min_val) } else { 0.0 };
+                                sl = sl.with_value(pct);
+                            }
+                            Box::new(sl)
+                        }
+                        _ => Box::new(Button::new(0.0, 0.0, 0.0, 0.0)),
+                    };
+
+                    widgets.push(JsonWidget {
+                        id,
+                        widget_type,
+                        text,
+                        widget,
+                        x: 0.0,
+                        y: 0.0,
+                        w: 0.0,
+                        h: 0.0,
+                        label_text: None,
+                        page_idx,
+                        target_page: w_conf.target_page,
+                    });
+                }
+            }
+        } else if let Some(ref widgets_conf) = config.widgets {
+            let global_justify = config.justify.unwrap_or(Justification::Center);
+            for (idx, w_conf) in widgets_conf.iter().enumerate() {
+                let id = w_conf.id.clone().unwrap_or_else(|| format!("widget_{}", idx));
+                let widget_type = w_conf.widget_type.clone();
+                let text = w_conf.text.clone();
+
+                let widget: Box<dyn Element> = match widget_type.as_str() {
+                    "checkbox" => {
+                        let mut cb = Checkbox::new();
+                        if let Some(ch) = w_conf.checked {
+                            cb.set_checked(ch);
+                        }
+                        Box::new(cb)
+                    }
+                    "button" => {
+                        Box::new(Button::new(0.0, 0.0, 0.0, 0.0)
+                            .with_label(&text)
+                            .with_justify(global_justify)
+                            .with_bg([0.0, 0.0, 0.0, 0.0])
+                            .with_hover_bg([0.20, 0.35, 0.65, 0.9]))
+                    }
+                    "label" => {
+                        Box::new(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
+                    }
+                    "spinbox" => {
+                        let min_val = w_conf.min.unwrap_or(0);
+                        let max_val = w_conf.max.unwrap_or(100);
+                        let step_val = w_conf.step.unwrap_or(1);
+                        let mut sb = Spinbox::new(w_conf.value.unwrap_or(0), min_val, max_val, step_val)
+                            .with_label(&text);
+                        if let Some(dec) = w_conf.decimals {
+                            sb = sb.with_decimals(dec);
+                        }
+                        Box::new(sb)
+                    }
+                    "color" | "rgb" | "rgba" => {
+                        let col = w_conf.color.unwrap_or([255, 255, 255]);
+                        let cs = ColorSelector::new(col).with_label(&text);
+                        Box::new(cs)
+                    }
+                    "slider" => {
+                        let min_val = w_conf.min_f32.unwrap_or(0.0);
+                        let max_val = w_conf.max_f32.unwrap_or(1.0);
+                        let mut sl = Slider::new()
+                            .with_range(min_val, max_val)
+                            .with_label(&text)
+                            .with_readout(true);
+                        if let Some(val) = w_conf.value_f32 {
+                            let pct = if max_val > min_val { (val - min_val) / (max_val - min_val) } else { 0.0 };
+                            sl = sl.with_value(pct);
+                        }
+                        Box::new(sl)
+                    }
+                    _ => Box::new(Button::new(0.0, 0.0, 0.0, 0.0)),
+                };
+
+                widgets.push(JsonWidget {
+                    id,
+                    widget_type,
+                    text,
+                    widget,
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                    label_text: None,
+                    page_idx: 0,
+                    target_page: w_conf.target_page,
+                });
+            }
+        }
+
+        Self {
+            base: Widget::new(),
+            widgets,
+            dragging_slider_idx: None,
+            page_scroll_y: vec![0.0; 16],
+            page_total_heights: vec![0.0; 16],
+            active_page: 0,
+        }
+    }
+
+    pub fn layout_children(&mut self) {
+        let (bx, by, bw, _) = self.rect();
+
+        let pad_x = 16.0;
+        let usable_w = bw - 2.0 * 16.0;
+        
+        let mut page_current_y = vec![16.0; 16]; // support up to 16 pages
+        let spacing = 12.0;
+
+        for w_state in &mut self.widgets {
+            let p_idx = w_state.page_idx;
+            if p_idx >= page_current_y.len() {
+                continue;
+            }
+            let current_y = &mut page_current_y[p_idx];
+            w_state.x = bx + pad_x;
+
+            let top_room = cce_ui::widget::label_offset(w_state.widget.as_ref());
+
+            let scroll_offset = self.page_scroll_y.get(p_idx).cloned().unwrap_or(0.0);
+            w_state.y = by + *current_y - scroll_offset;
+            w_state.w = usable_w;
+
+            if w_state.widget_type == "checkbox" {
+                // set_rect is an Element method; call it on the box directly (the Phase 5
+                // Checkbox is an Adapted widget — as_any downcasts reach the model, not Element).
+                w_state.widget.set_rect(w_state.x, w_state.y + 2.0, 18.0, 18.0);
+                w_state.h = 22.0;
+                w_state.label_text = Some(TextLabel {
+                    text: w_state.text.clone(),
+                    x: w_state.x + 28.0,
+                    y: w_state.y + 2.0,
+                    font_size: 13.0,
+                    color: [0xcc, 0xcc, 0xd4],
+                });
+            } else {
+                let h = match w_state.widget_type.as_str() {
+                    "button" => 24.0 + top_room,
+                    "label" => 18.0 + top_room,
+                    "spinbox" => cce_ui::layout::spinbox_height() + top_room,
+                    "color" | "rgb" | "rgba" => cce_ui::layout::color_selector_height() + top_room,
+                    "slider" => 22.0 + top_room,
+                    _ => 24.0,
+                };
+                w_state.widget.set_rect(w_state.x, w_state.y, usable_w, h);
+                w_state.h = h;
+            }
+
+            *current_y += w_state.h + spacing;
+        }
+
+        // Store total height of each page (adding a little padding at the end)
+        for (i, &height) in page_current_y.iter().enumerate() {
+            if i < self.page_total_heights.len() {
+                self.page_total_heights[i] = height + 4.0;
+            }
+        }
+    }
+}
+
+impl Element for JsonLayoutWidget {
+    fn is_scrollable(&self) -> bool { true }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_ptr(&self) -> *mut (dyn Element + 'static) {
+        self as *const Self as *mut Self as *mut (dyn Element + 'static)
+    }
+    fn as_ptr_mut(&mut self) -> *mut (dyn Element + 'static) {
+        self as *mut Self as *mut (dyn Element + 'static)
+    }
+
+    fn base(&self) -> Option<&Widget> { Some(&self.base) }
+    fn base_mut(&mut self) -> Option<&mut Widget> { Some(&mut self.base) }
+    fn color(&self) -> [f32; 4] { [0.0, 0.0, 0.0, 0.0] }
+
+    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
+        if let Some(b) = self.base_mut() {
+            b.x = x;
+            b.y = y;
+            b.w = w;
+            b.h = h;
+        }
+        self.layout_children();
+    }
+
+    fn tick(&mut self, dt: f32, ctx: &mut UiContext) -> bool {
+        let mut changed = false;
+        let active_page = self.active_page;
+        for w in &mut self.widgets {
+            if w.page_idx != active_page {
+                continue;
+            }
+            if w.widget.tick(dt, ctx) {
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    fn wants_tick(&self) -> bool {
+        true
+    }
+
+    fn all_quads(&self, ctx: &UiContext) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
+        let mut quads = Vec::new();
+
+        let active_page = self.active_page;
+        let (bx, by, bw, bh) = self.rect();
+        let pad_x = 16.0;
+        let min_x = bx + pad_x - 4.0;
+        let max_x = bx + bw;
+        let min_y = by;
+        let max_y = by + bh;
+
+        let push_clipped = |qx: f32, qy: f32, qw: f32, qh: f32, qc: [f32; 4], q: &mut Vec<(f32, f32, f32, f32, [f32; 4])>| {
+            let rx1 = qx.max(min_x);
+            let ry1 = qy.max(min_y);
+            let rx2 = (qx + qw).min(max_x);
+            let ry2 = (qy + qh).min(max_y);
+            let rw = rx2 - rx1;
+            let rh = ry2 - ry1;
+            if rw > 0.0 && rh > 0.0 {
+                q.push((rx1, ry1, rw, rh, qc));
+            }
+        };
+
+        for w in &self.widgets {
+            if w.page_idx != active_page {
+                continue;
+            }
+            let (wx, wy, ww, wh) = w.widget.rect();
+            let has_rounded = w.widget.rounded_corners() != (false, false, false, false);
+            if !has_rounded {
+                push_clipped(wx, wy, ww, wh, w.widget.color(), &mut quads);
+            }
+            for q in w.widget.all_quads(ctx) {
+                if has_rounded && (q.0 - wx).abs() < 0.1 && (q.1 - wy).abs() < 0.1 && (q.2 - ww).abs() < 0.1 && (q.3 - wh).abs() < 0.1 {
+                    continue;
+                }
+                push_clipped(q.0, q.1, q.2, q.3, q.4, &mut quads);
+            }
+            if let Some(hq) = w.widget.highlight_quad(ctx) {
+                push_clipped(hq.0, hq.1, hq.2, hq.3, hq.4, &mut quads);
+            }
+        }
+        quads
+    }
+
+    fn handle_event(&mut self, event: &Event, ctx: &mut UiContext) -> bool {
+        let mut changed = false;
+
+        match event {
+            Event::PointerMove { x, y, .. } => {
+                if let Some(idx) = self.dragging_slider_idx {
+                    if let Some(w) = self.widgets.get_mut(idx) {
+                        // drag_update is an Element method (the Adapted forward supplies the
+                        // widget's rect); call it on the box, not a concrete downcast.
+                        if w.widget.drag_update(*x, *y) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            Event::MouseButton { button, state, x: _, y: _, .. } => {
+                if *button == MouseButton::Left && *state == ElementState::Released {
+                    if let Some(idx) = self.dragging_slider_idx {
+                        if let Some(w) = self.widgets.get_mut(idx) {
+                            w.widget.handle_event(event, ctx);
+                            changed = true;
+                        }
+                        self.dragging_slider_idx = None;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let active_page = self.active_page;
+        let mut page_switch = None;
+        for (idx, w) in self.widgets.iter_mut().enumerate() {
+            if w.page_idx != active_page {
+                continue;
+            }
+
+            if let Event::MouseButton { button, state, x, y, .. } = event {
+                if *button == MouseButton::Left && *state == ElementState::Pressed {
+                    let hit = *x >= w.x && *x <= w.x + w.w && *y >= w.y && *y <= w.y + w.h;
+                    if hit && w.widget_type == "slider" {
+                        self.dragging_slider_idx = Some(idx);
+                    }
+                }
+            }
+
+            if w.widget_type == "checkbox" {
+                match event {
+                    Event::PointerMove { x, y, .. } => {
+                        if let Some(cb) = w.widget.as_any_mut().downcast_mut::<Checkbox>() {
+                            let was = cb.hovered();
+                            let hit = *x >= w.x && *x <= w.x + w.w && *y >= w.y && *y <= w.y + w.h;
+                            cb.set_hovered(hit);
+                            if was != hit {
+                                changed = true;
+                            }
+                        }
+                    }
+                    Event::MouseButton { button, state, x, y, .. } => {
+                        if *button == MouseButton::Left {
+                            let hit = *x >= w.x && *x <= w.x + w.w && *y >= w.y && *y <= w.y + w.h;
+                            if hit {
+                                if *state == ElementState::Pressed {
+                                    changed = true;
+                                } else if *state == ElementState::Released {
+                                    if let Some(cb) = w.widget.as_any_mut().downcast_mut::<Checkbox>() {
+                                        let new_checked = !cb.checked();
+                                        cb.set_checked(new_checked);
+                                    }
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                if w.widget.handle_event(event, ctx) {
+                    changed = true;
+                }
+                if w.widget_type == "button" {
+                    // take_click is an Element method; the Phase 5 Button is Adapted, so call it
+                    // on the box directly rather than through a concrete downcast.
+                    if w.target_page.is_some() && w.widget.take_click() {
+                        page_switch = Some(w.target_page.unwrap());
+                    }
+                }
+            }
+        }
+
+        if let Some(target) = page_switch {
+            self.active_page = target;
+            self.layout_children();
+            changed = true;
+        }
+
+        if let Event::MouseWheel { delta, x, y, .. } = event {
+            let (bx, by, bw, bh) = self.rect();
+            if *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh {
+                if active_page < self.page_total_heights.len() {
+                    let total_height = self.page_total_heights[active_page];
+                    let visible_h = bh;
+                    let max_scroll_y = (total_height - visible_h).max(0.0);
+                    if max_scroll_y > 0.0 {
+                        let scroll_amount = match delta {
+                            cce_ui::widget::MouseScrollDelta::LineDelta(_x, y) => -*y * 24.0,
+                            cce_ui::widget::MouseScrollDelta::PixelDelta(pos) => -pos.y as f32,
+                        };
+                        let old_scroll = self.page_scroll_y[active_page];
+                        self.page_scroll_y[active_page] = (old_scroll + scroll_amount).clamp(0.0, max_scroll_y);
+                        if (self.page_scroll_y[active_page] - old_scroll).abs() > 0.01 {
+                            self.layout_children();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Event::KeyInput(key_event) = event {
+            if key_event.state == ElementState::Pressed {
+                if active_page < self.page_total_heights.len() {
+                    let total_height = self.page_total_heights[active_page];
+                    let (_, _, _, bh) = self.rect();
+                    let max_scroll_y = (total_height - bh).max(0.0);
+                    if max_scroll_y > 0.0 {
+                        let old_scroll = self.page_scroll_y[active_page];
+                        match &key_event.logical_key {
+                            Key::Named(NamedKey::PageDown) => {
+                                self.page_scroll_y[active_page] = (old_scroll + bh).clamp(0.0, max_scroll_y);
+                            }
+                            Key::Named(NamedKey::PageUp) => {
+                                self.page_scroll_y[active_page] = (old_scroll - bh).clamp(0.0, max_scroll_y);
+                            }
+                            Key::Named(NamedKey::Home) => {
+                                self.page_scroll_y[active_page] = 0.0;
+                            }
+                            Key::Named(NamedKey::End) => {
+                                self.page_scroll_y[active_page] = max_scroll_y;
+                            }
+                            Key::Named(NamedKey::ArrowDown) => {
+                                self.page_scroll_y[active_page] = (old_scroll + 24.0).clamp(0.0, max_scroll_y);
+                            }
+                            Key::Named(NamedKey::ArrowUp) => {
+                                self.page_scroll_y[active_page] = (old_scroll - 24.0).clamp(0.0, max_scroll_y);
+                            }
+                            _ => {}
+                        }
+                        if (self.page_scroll_y[active_page] - old_scroll).abs() > 0.01 {
+                            self.layout_children();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Event::Tick(dt) = event {
+            for w in &mut self.widgets {
+                if w.page_idx != active_page {
+                    continue;
+                }
+                if w.widget.tick(*dt, ctx) {
+                    changed = true;
+                }
+            }
+        }
+
+        if let Event::MouseButton { state, .. } = event {
+            if *state == ElementState::Pressed && !changed {
+                ctx.clear_focus();
+            }
+        }
+
+        changed
+    }
+
+    fn mouse_input(&mut self, button: MouseButton, state: ElementState, px: f32, py: f32, ctx: &mut UiContext) -> bool {
+        self.handle_event(&Event::MouseButton { button, state, x: px, y: py, local_x: px, local_y: py }, ctx)
+    }
+
+    fn on_cursor_moved(&mut self, px: f32, py: f32, ctx: &mut UiContext) -> bool {
+        self.handle_event(&Event::PointerMove { x: px, y: py, local_x: px, local_y: py }, ctx)
+    }
+
+    fn children(&self, _ctx: &UiContext) -> Vec<*mut (dyn Element + 'static)> {
+        self.widgets.iter().map(|w| w.widget.as_ptr()).collect()
+    }
+
+    // JsonLayout renders its whole subtree itself: page-filtered aggregates plus the
+    // checkbox side-labels that belong to the container, not to any child widget. The
+    // paint walk must emit these once and not descend (descending would draw inactive
+    // pages' widgets and miss the side-labels).
+    fn renders_own_subtree(&self) -> bool {
+        true
+    }
+
+    fn paint_self(&self, ui: &UiContext, pc: &mut cce_ui::scene::paint::PaintCtx) {
+        use cce_ui::scene::layout::Rect;
+        for (x, y, w, h, r, c, corners) in self.all_rounded_quads(ui) {
+            pc.rounded_rect(Rect { x, y, width: w, height: h }, r, corners, c);
+        }
+        for (x, y, w, h, c) in self.all_quads(ui) {
+            pc.quad(Rect { x, y, width: w, height: h }, c);
+        }
+        for (cx, cy, r, t, s, e, c) in self.extra_arcs() {
+            pc.arc(cx, cy, r, t, s, e, c);
+        }
+        for (cx, cy, r, c) in self.extra_circles() {
+            pc.circle(cx, cy, r, c);
+        }
+        for (tl, bounds) in self.own_labels_with_bounds(ui) {
+            pc.text_with(tl.text, tl.x, tl.y, tl.font_size, tl.color, None, bounds);
+        }
+    }
+}
+
+impl JsonLayoutWidget {
+    pub(crate) fn own_labels_with_bounds(&self, ctx: &UiContext) -> Vec<(TextLabel, Option<[f32; 4]>)> {
+        let mut labels = Vec::new();
+        let (bx, by, bw, bh) = self.rect();
+
+        let active_page = self.active_page;
+        let pad_x = 16.0;
+        let content_bounds = Some([bx + pad_x - 4.0, by, bx + bw, by + bh]);
+
+        for w in &self.widgets {
+            if w.page_idx != active_page {
+                continue;
+            }
+            let w_labels = if w.widget_type == "checkbox" {
+                if let Some(tl) = &w.label_text {
+                    vec![tl.clone()]
+                } else {
+                    Vec::new()
+                }
+            } else {
+                // The trait text getters are gone: read the child's text off the paint
+                // walk (same prims, fonts dropped — this consumer shapes with its own
+                // control font, as the legacy getter path did).
+                let mut scratch = cce_ui::scene::paint::PaintCtx::new();
+                cce_ui::scene::painter::append_widget_text(ctx, unsafe { &*w.widget.as_ptr() }, &mut scratch);
+                scratch
+                    .finish()
+                    .items
+                    .into_iter()
+                    .filter_map(|item| match item.prim {
+                        cce_ui::scene::paint::Prim::Text { text, x, y, font_size, color, .. } => {
+                            Some(TextLabel { text, x, y, font_size, color })
+                        }
+                        _ => None,
+                    })
+                    .collect()
+            };
+            for l in w_labels {
+                labels.push((l, content_bounds));
+            }
+        }
+        labels
+    }
+}
