@@ -364,7 +364,7 @@ impl JsonLayoutWidget {
                 continue;
             }
             let (wx, wy, ww, wh) = w.widget.as_dyn().rect();
-            let has_rounded = w.widget.as_dyn().rounded_corners() != (false, false, false, false);
+            let has_rounded = w.widget.as_dyn().corner_style().1 != (false, false, false, false);
             if !has_rounded {
                 push_clipped(wx, wy, ww, wh, w.widget.as_dyn().color(), &mut quads);
             }
