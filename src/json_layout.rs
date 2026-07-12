@@ -45,11 +45,47 @@ pub struct JsonLayoutConfig {
     pub justify: Option<Justification>,
 }
 
+/// The config-constructible controls, concretely typed (Phase 6bb part 3): this was the
+/// last owned type-erased widget storage in the workspace. `as_dyn`/`as_dyn_mut` serve the
+/// aggregation/routing paths that dispatch heterogeneously.
+pub enum JsonControl {
+    Label(cce_ui::widget::Adapted<Label>),
+    Checkbox(cce_ui::widget::Adapted<Checkbox>),
+    Button(cce_ui::widget::Adapted<Button>),
+    Spinbox(cce_ui::widget::Adapted<Spinbox>),
+    Color(cce_ui::widget::Adapted<ColorSelector>),
+    Slider(cce_ui::widget::Adapted<Slider>),
+}
+
+impl JsonControl {
+    pub fn as_dyn(&self) -> &(dyn Element + 'static) {
+        match self {
+            JsonControl::Label(w) => w,
+            JsonControl::Checkbox(w) => w,
+            JsonControl::Button(w) => w,
+            JsonControl::Spinbox(w) => w,
+            JsonControl::Color(w) => w,
+            JsonControl::Slider(w) => w,
+        }
+    }
+
+    pub fn as_dyn_mut(&mut self) -> &mut (dyn Element + 'static) {
+        match self {
+            JsonControl::Label(w) => w,
+            JsonControl::Checkbox(w) => w,
+            JsonControl::Button(w) => w,
+            JsonControl::Spinbox(w) => w,
+            JsonControl::Color(w) => w,
+            JsonControl::Slider(w) => w,
+        }
+    }
+}
+
 pub struct JsonWidget {
     pub id: String,
     pub widget_type: String,
     pub text: String,
-    pub widget: Box<dyn Element>,
+    pub widget: JsonControl,
     pub x: f32,
     pub y: f32,
     pub w: f32,
@@ -82,23 +118,23 @@ impl JsonLayoutWidget {
                     let widget_type = w_conf.widget_type.clone();
                     let text = w_conf.text.clone();
 
-                    let widget: Box<dyn Element> = match widget_type.as_str() {
+                    let widget: JsonControl = match widget_type.as_str() {
                         "checkbox" => {
                             let mut cb = Checkbox::new();
                             if let Some(ch) = w_conf.checked {
                                 cb.set_checked(ch);
                             }
-                            Box::new(cb)
+                            JsonControl::Checkbox(cb)
                         }
                         "button" => {
-                            Box::new(Button::new(0.0, 0.0, 0.0, 0.0)
+                            JsonControl::Button(Button::new(0.0, 0.0, 0.0, 0.0)
                                 .with_label(&text)
                                 .with_justify(page_justify)
                                 .with_bg([0.0, 0.0, 0.0, 0.0])
                                 .with_hover_bg([0.20, 0.35, 0.65, 0.9]))
                         }
                         "label" => {
-                            Box::new(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
+                            JsonControl::Label(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
                         }
                         "spinbox" => {
                             let min_val = w_conf.min.unwrap_or(0);
@@ -109,12 +145,12 @@ impl JsonLayoutWidget {
                             if let Some(dec) = w_conf.decimals {
                                 sb = sb.with_decimals(dec);
                             }
-                            Box::new(sb)
+                            JsonControl::Spinbox(sb)
                         }
                         "color" | "rgb" | "rgba" => {
                             let col = w_conf.color.unwrap_or([255, 255, 255]);
                             let cs = ColorSelector::new(col).with_label(&text);
-                            Box::new(cs)
+                            JsonControl::Color(cs)
                         }
                         "slider" => {
                             let min_val = w_conf.min_f32.unwrap_or(0.0);
@@ -127,9 +163,9 @@ impl JsonLayoutWidget {
                                 let pct = if max_val > min_val { (val - min_val) / (max_val - min_val) } else { 0.0 };
                                 sl = sl.with_value(pct);
                             }
-                            Box::new(sl)
+                            JsonControl::Slider(sl)
                         }
-                        _ => Box::new(Button::new(0.0, 0.0, 0.0, 0.0)),
+                        _ => JsonControl::Button(Button::new(0.0, 0.0, 0.0, 0.0)),
                     };
 
                     widgets.push(JsonWidget {
@@ -154,23 +190,23 @@ impl JsonLayoutWidget {
                 let widget_type = w_conf.widget_type.clone();
                 let text = w_conf.text.clone();
 
-                let widget: Box<dyn Element> = match widget_type.as_str() {
+                let widget: JsonControl = match widget_type.as_str() {
                     "checkbox" => {
                         let mut cb = Checkbox::new();
                         if let Some(ch) = w_conf.checked {
                             cb.set_checked(ch);
                         }
-                        Box::new(cb)
+                        JsonControl::Checkbox(cb)
                     }
                     "button" => {
-                        Box::new(Button::new(0.0, 0.0, 0.0, 0.0)
+                        JsonControl::Button(Button::new(0.0, 0.0, 0.0, 0.0)
                             .with_label(&text)
                             .with_justify(global_justify)
                             .with_bg([0.0, 0.0, 0.0, 0.0])
                             .with_hover_bg([0.20, 0.35, 0.65, 0.9]))
                     }
                     "label" => {
-                        Box::new(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
+                        JsonControl::Label(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
                     }
                     "spinbox" => {
                         let min_val = w_conf.min.unwrap_or(0);
@@ -181,12 +217,12 @@ impl JsonLayoutWidget {
                         if let Some(dec) = w_conf.decimals {
                             sb = sb.with_decimals(dec);
                         }
-                        Box::new(sb)
+                        JsonControl::Spinbox(sb)
                     }
                     "color" | "rgb" | "rgba" => {
                         let col = w_conf.color.unwrap_or([255, 255, 255]);
                         let cs = ColorSelector::new(col).with_label(&text);
-                        Box::new(cs)
+                        JsonControl::Color(cs)
                     }
                     "slider" => {
                         let min_val = w_conf.min_f32.unwrap_or(0.0);
@@ -199,9 +235,9 @@ impl JsonLayoutWidget {
                             let pct = if max_val > min_val { (val - min_val) / (max_val - min_val) } else { 0.0 };
                             sl = sl.with_value(pct);
                         }
-                        Box::new(sl)
+                        JsonControl::Slider(sl)
                     }
-                    _ => Box::new(Button::new(0.0, 0.0, 0.0, 0.0)),
+                    _ => JsonControl::Button(Button::new(0.0, 0.0, 0.0, 0.0)),
                 };
 
                 widgets.push(JsonWidget {
@@ -247,7 +283,7 @@ impl JsonLayoutWidget {
             let current_y = &mut page_current_y[p_idx];
             w_state.x = bx + pad_x;
 
-            let top_room = cce_ui::widget::label_offset(w_state.widget.as_ref());
+            let top_room = cce_ui::widget::label_offset(w_state.widget.as_dyn());
 
             let scroll_offset = self.page_scroll_y.get(p_idx).cloned().unwrap_or(0.0);
             w_state.y = by + *current_y - scroll_offset;
@@ -256,7 +292,7 @@ impl JsonLayoutWidget {
             if w_state.widget_type == "checkbox" {
                 // set_rect is an Element method; call it on the box directly (the Phase 5
                 // Checkbox is an Adapted widget — as_any downcasts reach the model, not Element).
-                w_state.widget.set_rect(w_state.x, w_state.y + 2.0, 18.0, 18.0);
+                w_state.widget.as_dyn_mut().set_rect(w_state.x, w_state.y + 2.0, 18.0, 18.0);
                 w_state.h = 22.0;
                 w_state.label_text = Some(TextLabel {
                     text: w_state.text.clone(),
@@ -274,7 +310,7 @@ impl JsonLayoutWidget {
                     "slider" => 22.0 + top_room,
                     _ => 24.0,
                 };
-                w_state.widget.set_rect(w_state.x, w_state.y, usable_w, h);
+                w_state.widget.as_dyn_mut().set_rect(w_state.x, w_state.y, usable_w, h);
                 w_state.h = h;
             }
 
@@ -327,18 +363,18 @@ impl JsonLayoutWidget {
             if w.page_idx != active_page {
                 continue;
             }
-            let (wx, wy, ww, wh) = w.widget.rect();
-            let has_rounded = w.widget.rounded_corners() != (false, false, false, false);
+            let (wx, wy, ww, wh) = w.widget.as_dyn().rect();
+            let has_rounded = w.widget.as_dyn().rounded_corners() != (false, false, false, false);
             if !has_rounded {
-                push_clipped(wx, wy, ww, wh, w.widget.color(), &mut quads);
+                push_clipped(wx, wy, ww, wh, w.widget.as_dyn().color(), &mut quads);
             }
-            for q in w.widget.all_quads(ctx) {
+            for q in w.widget.as_dyn().all_quads(ctx) {
                 if has_rounded && (q.0 - wx).abs() < 0.1 && (q.1 - wy).abs() < 0.1 && (q.2 - ww).abs() < 0.1 && (q.3 - wh).abs() < 0.1 {
                     continue;
                 }
                 push_clipped(q.0, q.1, q.2, q.3, q.4, &mut quads);
             }
-            if let Some(hq) = w.widget.highlight_quad(ctx) {
+            if let Some(hq) = w.widget.as_dyn().highlight_quad(ctx) {
                 push_clipped(hq.0, hq.1, hq.2, hq.3, hq.4, &mut quads);
             }
         }
@@ -353,7 +389,7 @@ impl JsonLayoutWidget {
             if w.page_idx != active_page {
                 continue;
             }
-            if w.widget.tick(dt, ctx) {
+            if w.widget.as_dyn_mut().tick(dt, ctx) {
                 changed = true;
             }
         }
@@ -373,7 +409,7 @@ impl JsonLayoutWidget {
                     if let Some(w) = self.widgets.get_mut(idx) {
                         // drag_update is an Element method (the Adapted forward supplies the
                         // widget's rect); call it on the box, not a concrete downcast.
-                        if w.widget.drag_update(*x, *y) {
+                        if w.widget.as_dyn_mut().drag_update(*x, *y) {
                             changed = true;
                         }
                     }
@@ -383,7 +419,7 @@ impl JsonLayoutWidget {
                 if *button == MouseButton::Left && *state == ElementState::Released {
                     if let Some(idx) = self.dragging_slider_idx {
                         if let Some(w) = self.widgets.get_mut(idx) {
-                            w.widget.handle_event(event, ctx);
+                            w.widget.as_dyn_mut().handle_event(event, ctx);
                             changed = true;
                         }
                         self.dragging_slider_idx = None;
@@ -412,7 +448,7 @@ impl JsonLayoutWidget {
             if w.widget_type == "checkbox" {
                 match event {
                     Event::PointerMove { x, y, .. } => {
-                        if let Some(cb) = w.widget.as_any_mut().downcast_mut::<Checkbox>() {
+                        if let Some(cb) = w.widget.as_dyn_mut().as_any_mut().downcast_mut::<Checkbox>() {
                             let was = cb.hovered();
                             let hit = *x >= w.x && *x <= w.x + w.w && *y >= w.y && *y <= w.y + w.h;
                             cb.set_hovered(hit);
@@ -428,7 +464,7 @@ impl JsonLayoutWidget {
                                 if *state == ElementState::Pressed {
                                     changed = true;
                                 } else if *state == ElementState::Released {
-                                    if let Some(cb) = w.widget.as_any_mut().downcast_mut::<Checkbox>() {
+                                    if let Some(cb) = w.widget.as_dyn_mut().as_any_mut().downcast_mut::<Checkbox>() {
                                         let new_checked = !cb.checked();
                                         cb.set_checked(new_checked);
                                     }
@@ -440,13 +476,13 @@ impl JsonLayoutWidget {
                     _ => {}
                 }
             } else {
-                if w.widget.handle_event(event, ctx) {
+                if w.widget.as_dyn_mut().handle_event(event, ctx) {
                     changed = true;
                 }
                 if w.widget_type == "button" {
                     // take_click is an Element method; the Phase 5 Button is Adapted, so call it
                     // on the box directly rather than through a concrete downcast.
-                    if w.target_page.is_some() && w.widget.take_click() {
+                    if w.target_page.is_some() && w.widget.as_dyn_mut().take_click() {
                         page_switch = Some(w.target_page.unwrap());
                     }
                 }
@@ -525,7 +561,7 @@ impl JsonLayoutWidget {
                 if w.page_idx != active_page {
                     continue;
                 }
-                if w.widget.tick(*dt, ctx) {
+                if w.widget.as_dyn_mut().tick(*dt, ctx) {
                     changed = true;
                 }
             }
@@ -570,7 +606,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         // Rounded: the deleted Element default's shape — no own background (transparent,
         // sharp corners), every child unfiltered, in `widgets` order.
         for w in &self.widgets {
-            for (x, y, qw, qh, r, c, corners) in w.widget.all_rounded_quads(&dummy) {
+            for (x, y, qw, qh, r, c, corners) in w.widget.as_dyn().all_rounded_quads(&dummy) {
                 pc.rounded_rect(Rect { x, y, width: qw, height: qh }, r, corners, c);
             }
         }
@@ -623,7 +659,7 @@ impl JsonLayoutWidget {
                 // walk (same prims, fonts dropped — this consumer shapes with its own
                 // control font, as the legacy getter path did).
                 let mut scratch = cce_ui::scene::paint::PaintCtx::new();
-                cce_ui::scene::painter::append_widget_text(ctx, unsafe { &*w.widget.as_ptr() }, &mut scratch);
+                cce_ui::scene::painter::append_widget_text(ctx, w.widget.as_dyn(), &mut scratch);
                 scratch
                     .finish()
                     .items

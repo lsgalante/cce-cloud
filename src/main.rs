@@ -1804,7 +1804,7 @@ impl PointerHandler for AppState {
                                     for w in &mut jl.widgets {
                                         // take_click is an Element method; Phase 5 Buttons are
                                         // Adapted, so ask the box directly.
-                                        if w.widget_type == "button" && w.widget.take_click() {
+                                        if w.widget_type == "button" && w.widget.as_dyn_mut().take_click() {
                                             clicked_btn_id = Some(w.id.clone());
                                             break;
                                         }
@@ -1821,13 +1821,13 @@ impl PointerHandler for AppState {
                                     let mut sliders = std::collections::HashMap::new();
                                     if let Some(jl) = &st.json_layout {
                                         for w in &jl.widgets {
-                                            if let Some(cb) = w.widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>() {
+                                            if let Some(cb) = w.widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>() {
                                                 checkboxes.insert(w.id.clone(), cb.checked());
-                                            } else if let Some(sb) = w.widget.as_any().downcast_ref::<cce_ui::widget::Spinbox>() {
+                                            } else if let Some(sb) = w.widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Spinbox>() {
                                                 spinboxes.insert(w.id.clone(), sb.value);
-                                            } else if let Some(cs) = w.widget.as_any().downcast_ref::<cce_ui::widget::ColorSelector>() {
+                                            } else if let Some(cs) = w.widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::ColorSelector>() {
                                                 colors.insert(w.id.clone(), cs.color);
-                                            } else if let Some(sl) = w.widget.as_any().downcast_ref::<cce_ui::widget::Slider>() {
+                                            } else if let Some(sl) = w.widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Slider>() {
                                                 sliders.insert(w.id.clone(), sl.get_scaled_value());
                                             }
                                         }
@@ -3093,9 +3093,9 @@ mod tests {
         let w_btn_x = layout.widgets[2].x;
         let w_btn_w = layout.widgets[2].w;
 
-        assert!(layout.widgets[0].widget.as_any().downcast_ref::<cce_ui::widget::Label>().is_some());
-        assert!(layout.widgets[1].widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>().is_some());
-        assert!(layout.widgets[2].widget.as_any().downcast_ref::<cce_ui::widget::Button>().is_some());
+        assert!(layout.widgets[0].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Label>().is_some());
+        assert!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().is_some());
+        assert!(layout.widgets[2].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Button>().is_some());
 
         // Check vertical sequence positions
         assert_eq!(w_label_y, 16.0);
@@ -3116,7 +3116,7 @@ mod tests {
         assert_eq!(w_btn_w, 268.0);
 
         // Verify Checkbox initial state
-        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), false);
+        assert_eq!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), false);
 
         // Simulate click on Checkbox row
         let changed = layout.mouse_input(
@@ -3127,13 +3127,13 @@ mod tests {
             &mut ctx,
         );
         assert!(changed);
-        assert_eq!(layout.widgets[1].widget.as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), true);
+        assert_eq!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), true);
 
         // Simulate hover on button
         let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0, &mut ctx);
         assert!(changed_hover);
         // Phase 5: hover state lives on the Button model (it drives the color matrix), not the base.
-        assert!(layout.widgets[2].widget.as_any().downcast_ref::<cce_ui::widget::Button>().unwrap().hovered());
+        assert!(layout.widgets[2].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Button>().unwrap().hovered());
     }
 
     #[test]
