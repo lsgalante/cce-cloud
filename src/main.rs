@@ -491,8 +491,8 @@ pub struct FuzzelWidget {
 }
 
 impl FuzzelWidget {
-    pub fn new(prompt: String) -> Self {
-        Self {
+    pub fn new(prompt: String) -> cce_ui::widget::Adapted<FuzzelWidget> {
+        cce_ui::widget::Adapted::new(Self {
             x: 0.0,
             y: 0.0,
             w: 0.0,
@@ -503,7 +503,7 @@ impl FuzzelWidget {
             filtered_items: Vec::new(),
             selected: 0,
             scroll_box: ScrollRegion::new(22.0, 0.0),
-        }
+        })
     }
 
     pub fn set_items(&mut self, items: Vec<String>) {
@@ -553,51 +553,39 @@ impl FuzzelWidget {
     }
 }
 
-impl Element for FuzzelWidget {
-    // Leaf legacy widget: own labels via paint_self (cce-ui's default no longer drains
-    // the text getters; walk_text_labels reads the walk).
-    fn paint_self(&self, ui: &cce_ui::context::UiContext, ctx: &mut cce_ui::scene::paint::PaintCtx) {
-        cce_ui::scene::painter::paint_legacy_leaf(
-            self, ui, ctx,
-            cce_ui::scene::painter::fonted_leaf_labels(self, ui, self.own_labels()),
-        );
-    }
-
-    fn rect(&self) -> (f32, f32, f32, f32) {
-        (self.x, self.y, self.w, self.h)
-    }
-
-    fn set_rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
-        self.x = x;
-        self.y = y;
-        self.w = w;
-        self.h = h;
+impl cce_ui::widget::Layout for FuzzelWidget {
+    // The legacy `set_rect` override's body: mirror the landed rect into the model (the
+    // scroll/label math reads it between events) and place the scroll region.
+    fn rect_assigned(&mut self, rect: cce_ui::scene::layout::Rect) {
+        self.x = rect.x;
+        self.y = rect.y;
+        self.w = rect.width;
+        self.h = rect.height;
 
         let pad = 15.0;
         let search_h = 35.0;
-        let viewport_y = y + pad + search_h + 10.0;
-        let viewport_h = h - (pad + search_h + 10.0) - pad;
-        self.scroll_box.set_rect(x + pad, viewport_y, w - pad * 2.0, viewport_h);
+        let viewport_y = rect.y + pad + search_h + 10.0;
+        let viewport_h = rect.height - (pad + search_h + 10.0) - pad;
+        self.scroll_box.set_rect(rect.x + pad, viewport_y, rect.width - pad * 2.0, viewport_h);
         self.update_scroll();
     }
+}
 
+impl cce_ui::widget::Paint for FuzzelWidget {
     fn color(&self) -> [f32; 4] {
         [0.0, 0.0, 0.0, 0.0]
     }
 
-    fn extra_quads(&self) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
-        let mut quads = Vec::new();
+    fn paint(&self, _rect: cce_ui::scene::layout::Rect, ctx: &mut cce_ui::scene::paint::PaintCtx) {
+        use cce_ui::scene::layout::Rect;
         let pad = 15.0;
         let search_h = 35.0;
-        
+
         // Search Bar Background
-        quads.push((
-            self.x + pad,
-            self.y + pad,
-            self.w - pad * 2.0,
-            search_h,
+        ctx.quad(
+            Rect { x: self.x + pad, y: self.y + pad, width: self.w - pad * 2.0, height: search_h },
             [0.10, 0.10, 0.14, 1.0],
-        ));
+        );
 
         // Search Bar Border
         let border_color = [0.25, 0.45, 0.85, 1.0];
@@ -605,13 +593,17 @@ impl Element for FuzzelWidget {
         let by = self.y + pad;
         let bw = self.w - pad * 2.0;
         let bh = search_h;
-        quads.push((bx, by, bw, 1.0, border_color));
-        quads.push((bx, by + bh - 1.0, bw, 1.0, border_color));
-        quads.push((bx, by, 1.0, bh, border_color));
-        quads.push((bx + bw - 1.0, by, 1.0, bh, border_color));
+        ctx.quad(Rect { x: bx, y: by, width: bw, height: 1.0 }, border_color);
+        ctx.quad(Rect { x: bx, y: by + bh - 1.0, width: bw, height: 1.0 }, border_color);
+        ctx.quad(Rect { x: bx, y: by, width: 1.0, height: bh }, border_color);
+        ctx.quad(Rect { x: bx + bw - 1.0, y: by, width: 1.0, height: bh }, border_color);
 
         // ScrollBox quads
+        let mut quads = Vec::new();
         self.scroll_box.push_quads(&mut quads);
+        for (qx, qy, qw, qh, qc) in quads {
+            ctx.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
+        }
 
         // Selected Item Highlight
         let item_h = 25.0;
@@ -619,25 +611,38 @@ impl Element for FuzzelWidget {
             let virtual_selected_y = self.selected as f32 * item_h;
             if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
                 let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
-                quads.push((
-                    self.x + pad + 2.0,
-                    draw_y,
-                    self.w - pad * 2.0 - 4.0 - scrollbar_w,
-                    item_h - 2.0,
+                ctx.quad(
+                    Rect {
+                        x: self.x + pad + 2.0,
+                        y: draw_y,
+                        width: self.w - pad * 2.0 - 4.0 - scrollbar_w,
+                        height: item_h - 2.0,
+                    },
                     [0.20, 0.35, 0.65, 0.9],
-                ));
+                );
             }
         }
 
-        quads
+        // Own labels: prompt/query line, visible items, empty-state notice.
+        for l in self.own_labels() {
+            ctx.text(l.text, l.x, l.y, l.font_size, l.color);
+        }
     }
+}
 
-
-    fn mouse_input(&mut self, button: cce_ui::widget::MouseButton, state: cce_ui::widget::ElementState, px: f32, py: f32, _ctx: &mut cce_ui::context::UiContext) -> bool {
-        if button == cce_ui::widget::MouseButton::Left && state == cce_ui::widget::ElementState::Pressed {
+impl cce_ui::widget::Input for FuzzelWidget {
+    fn on_event(&mut self, event: &cce_ui::widget::Event, _ectx: &mut cce_ui::widget::EventCtx) -> bool {
+        if let cce_ui::widget::Event::MouseButton {
+            button: cce_ui::widget::MouseButton::Left,
+            state: cce_ui::widget::ElementState::Pressed,
+            x: px,
+            y: py,
+            ..
+        } = event
+        {
             let item_h = 25.0;
-            if self.scroll_box.hit(px, py) {
-                let click_virtual_y = py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
+            if self.scroll_box.hit(*px, *py) {
+                let click_virtual_y = *py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
                 let clicked_idx = (click_virtual_y / item_h).floor() as usize;
                 if clicked_idx < self.filtered_items.len() {
                     self.selected = clicked_idx;
@@ -692,7 +697,7 @@ struct State {
     vertex_buffer: wgpu::Buffer,
     vertex_count: u32,
 
-    fuzzel: FuzzelWidget,
+    fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
     json_layout: Option<JsonLayoutWidget>,
     font_system: FontSystem,
     swash_cache: SwashCache,
