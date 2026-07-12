@@ -5,7 +5,7 @@
 //! prims verbatim. `Justification` stayed in cce-ui (Button, cce-files, settings).
 
 use cce_ui::widget::{
-    Element, Widget, Checkbox, Button, Label, Spinbox, ColorSelector, TextLabel, MouseButton, ElementState, Slider, Event, UiContext,
+    WidgetHost, Widget, Checkbox, Button, Label, Spinbox, ColorSelector, TextLabel, MouseButton, ElementState, Slider, Event, UiContext,
     Key, NamedKey, Justification,
 };
 use serde::Deserialize;
@@ -58,7 +58,7 @@ pub enum JsonControl {
 }
 
 impl JsonControl {
-    pub fn as_dyn(&self) -> &(dyn Element + 'static) {
+    pub fn as_dyn(&self) -> &(dyn WidgetHost + 'static) {
         match self {
             JsonControl::Label(w) => w,
             JsonControl::Checkbox(w) => w,
@@ -69,7 +69,7 @@ impl JsonControl {
         }
     }
 
-    pub fn as_dyn_mut(&mut self) -> &mut (dyn Element + 'static) {
+    pub fn as_dyn_mut(&mut self) -> &mut (dyn WidgetHost + 'static) {
         match self {
             JsonControl::Label(w) => w,
             JsonControl::Checkbox(w) => w,
@@ -290,8 +290,8 @@ impl JsonLayoutWidget {
             w_state.w = usable_w;
 
             if w_state.widget_type == "checkbox" {
-                // set_rect is an Element method; call it on the box directly (the Phase 5
-                // Checkbox is an Adapted widget — as_any downcasts reach the model, not Element).
+                // set_rect is an WidgetHost method; call it on the box directly (the Phase 5
+                // Checkbox is an Adapted widget — as_any downcasts reach the model, not WidgetHost).
                 w_state.widget.as_dyn_mut().set_rect(w_state.x, w_state.y + 2.0, 18.0, 18.0);
                 w_state.h = 22.0;
                 w_state.label_text = Some(TextLabel {
@@ -332,7 +332,7 @@ impl JsonLayoutWidget {
         (self.base.x, self.base.y, self.base.w, self.base.h)
     }
 
-    /// The page-filtered plain-quad aggregate (the old `Element::all_quads` override):
+    /// The page-filtered plain-quad aggregate (the old `WidgetHost::all_quads` override):
     /// active-page children's backgrounds, decoration quads, and highlight, clipped to
     /// the content area. External readers reach it through the adapter's reverse bridge
     /// (`jl.all_quads(ctx)` serves `paint`'s plain prims, which come from here).
@@ -381,7 +381,7 @@ impl JsonLayoutWidget {
         quads
     }
 
-    /// Per-frame child state (the old `Element::tick` override): active-page widgets only.
+    /// Per-frame child state (the old `WidgetHost::tick` override): active-page widgets only.
     fn tick_children(&mut self, dt: f32, ctx: &mut UiContext) -> bool {
         let mut changed = false;
         let active_page = self.active_page;
@@ -396,7 +396,7 @@ impl JsonLayoutWidget {
         changed
     }
 
-    /// The whole-subtree event routing (the old `Element::handle_event` override,
+    /// The whole-subtree event routing (the old `WidgetHost::handle_event` override,
     /// verbatim). Every press reaches it (`Input::gates_presses` is off), matching the
     /// ungated legacy direct-dispatch path — the trailing focus-clear on a missed press
     /// depends on that.
@@ -407,7 +407,7 @@ impl JsonLayoutWidget {
             Event::PointerMove { x, y, .. } => {
                 if let Some(idx) = self.dragging_slider_idx {
                     if let Some(w) = self.widgets.get_mut(idx) {
-                        // drag_update is an Element method (the Adapted forward supplies the
+                        // drag_update is an WidgetHost method (the Adapted forward supplies the
                         // widget's rect); call it on the box, not a concrete downcast.
                         if w.widget.as_dyn_mut().drag_update(*x, *y) {
                             changed = true;
@@ -480,7 +480,7 @@ impl JsonLayoutWidget {
                     changed = true;
                 }
                 if w.widget_type == "button" {
-                    // take_click is an Element method; the Phase 5 Button is Adapted, so call it
+                    // take_click is an WidgetHost method; the Phase 5 Button is Adapted, so call it
                     // on the box directly rather than through a concrete downcast.
                     if w.target_page.is_some() && w.widget.as_dyn_mut().take_click() {
                         page_switch = Some(w.target_page.unwrap());
@@ -603,7 +603,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         // label walk reads comes from the routing context, so a fresh one stands in for
         // the ctx `Paint::paint` does not carry.
         let dummy = UiContext::new();
-        // Rounded: the deleted Element default's shape — no own background (transparent,
+        // Rounded: the deleted WidgetHost default's shape — no own background (transparent,
         // sharp corners), every child unfiltered, in `widgets` order.
         for w in &self.widgets {
             for (x, y, qw, qh, r, c, corners) in w.widget.as_dyn().all_rounded_quads(&dummy) {

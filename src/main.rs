@@ -4,7 +4,7 @@ use scroll_region::ScrollRegion;
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
-use cce_ui::widget::{Element, TextLabel};
+use cce_ui::widget::{WidgetHost, TextLabel};
 use crate::json_layout::{JsonLayoutWidget, JsonLayoutConfig};
 mod json_layout;
 #[cfg(test)]
@@ -130,7 +130,7 @@ fn rounded_rect_vertices_corners(
     verts
 }
 
-fn widget_vertices(w: &dyn Element, sw: f32, sh: f32) -> Vec<Vertex> {
+fn widget_vertices(w: &dyn WidgetHost, sw: f32, sh: f32) -> Vec<Vertex> {
     let (x, y, ww, h) = w.rect();
     let mut verts = quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec();
     for (qx, qy, qw, qh, qc) in w.extra_quads() {
@@ -152,7 +152,7 @@ fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buff
 /// A widget subtree's text via the paint walk (not the legacy text_labels getter),
 /// reduced to the plain labels this renderer shapes: the buffer font and window bounds
 /// stay exactly as before (make_text_buffer applies the control font to every label).
-fn walk_text_labels(ui: &cce_ui::context::UiContext, w: &dyn Element) -> Vec<TextLabel> {
+fn walk_text_labels(ui: &cce_ui::context::UiContext, w: &dyn WidgetHost) -> Vec<TextLabel> {
     let mut pc = cce_ui::scene::paint::PaintCtx::new();
     cce_ui::scene::painter::append_widget_text(ui, w, &mut pc);
     pc.finish()
@@ -1802,7 +1802,7 @@ impl PointerHandler for AppState {
                                         changed = true;
                                     }
                                     for w in &mut jl.widgets {
-                                        // take_click is an Element method; Phase 5 Buttons are
+                                        // take_click is an WidgetHost method; Phase 5 Buttons are
                                         // Adapted, so ask the box directly.
                                         if w.widget_type == "button" && w.widget.as_dyn_mut().take_click() {
                                             clicked_btn_id = Some(w.id.clone());
@@ -3010,7 +3010,7 @@ mod tests {
 
     #[test]
     fn test_json_layout_widget_flow() {
-        use cce_ui::widget::Element;
+        use cce_ui::widget::WidgetHost;
 
         let widgets_conf = vec![
             JsonWidgetConfig {
