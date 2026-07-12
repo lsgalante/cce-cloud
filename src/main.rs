@@ -1,3 +1,6 @@
+mod scroll_region;
+use scroll_region::ScrollRegion;
+
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
 
@@ -482,7 +485,7 @@ pub struct FuzzelWidget {
     all_items: Vec<String>,
     filtered_items: Vec<String>,
     selected: usize,
-    pub scroll_box: cce_ui::widget::ScrollBox,
+    pub scroll_box: ScrollRegion,
 }
 
 impl FuzzelWidget {
@@ -497,7 +500,7 @@ impl FuzzelWidget {
             all_items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
-            scroll_box: cce_ui::widget::ScrollBox::new(),
+            scroll_box: ScrollRegion::new(22.0, 0.0),
         }
     }
 
@@ -522,7 +525,7 @@ impl FuzzelWidget {
         let viewport_y = self.y + pad + search_h + 10.0;
         let viewport_h = self.h - (pad + search_h + 10.0) - pad;
         let content_h = self.filtered_items.len() as f32 * item_h;
-        self.scroll_box.update_bounds(content_h, viewport_y, viewport_h);
+        self.scroll_box.update_bounds_raw(content_h, viewport_y, viewport_h);
     }
 
     pub fn snap_to_selected(&mut self) {
@@ -606,13 +609,13 @@ impl Element for FuzzelWidget {
         quads.push((bx + bw - 1.0, by, 1.0, bh, border_color));
 
         // ScrollBox quads
-        quads.extend(self.scroll_box.extra_quads());
+        self.scroll_box.push_quads(&mut quads);
 
         // Selected Item Highlight
         let item_h = 25.0;
         if !self.filtered_items.is_empty() {
             let virtual_selected_y = self.selected as f32 * item_h;
-            if let Some(draw_y) = self.scroll_box.get_item_draw_y(virtual_selected_y, item_h) {
+            if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
                 let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
                 quads.push((
                     self.x + pad + 2.0,
@@ -628,10 +631,10 @@ impl Element for FuzzelWidget {
     }
 
 
-    fn mouse_input(&mut self, button: cce_ui::widget::MouseButton, state: cce_ui::widget::ElementState, px: f32, py: f32, ctx: &mut cce_ui::context::UiContext) -> bool {
+    fn mouse_input(&mut self, button: cce_ui::widget::MouseButton, state: cce_ui::widget::ElementState, px: f32, py: f32, _ctx: &mut cce_ui::context::UiContext) -> bool {
         if button == cce_ui::widget::MouseButton::Left && state == cce_ui::widget::ElementState::Pressed {
             let item_h = 25.0;
-            if self.scroll_box.hit_test(px, py, ctx) {
+            if self.scroll_box.hit(px, py) {
                 let click_virtual_y = py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
                 let clicked_idx = (click_virtual_y / item_h).floor() as usize;
                 if clicked_idx < self.filtered_items.len() {
@@ -714,7 +717,12 @@ struct State {
     switcher_mode: bool,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
-    root_window: cce_ui::widget::Backplate,
+    /// Dissolved root Backplate (Phase 6as): the plate was a pure value-holder for the
+    /// window background — color (at backplate opacity), radius, rect. No border, no
+    /// children, no events.
+    window_rect: (f32, f32, f32, f32),
+    window_bg: [f32; 4],
+    window_radius: f32,
     select_and_close_requested: bool,
 }
 
@@ -1054,9 +1062,8 @@ impl State {
 
         cce_ui::scale::set_app_id("cce-cloud".to_string());
         let bg_color = cce_ui::color::page_low_color();
-        let root_window = cce_ui::widget::Backplate::new(0.0, 0.0, lw, lh)
-            .with_background(bg_color)
-            .with_radius(cce_ui::color::backplate_corner_radius());
+        let window_rect = (0.0, 0.0, lw, lh);
+        let window_radius = cce_ui::color::backplate_corner_radius();
 
         let mut state = Self {
             window: Some(window),
@@ -1093,7 +1100,9 @@ impl State {
             switcher_mode,
             last_tick: std::time::Instant::now(),
             ui_context: cce_ui::context::UiContext::new(),
-            root_window,
+            window_rect,
+            window_bg: bg_color,
+            window_radius,
             select_and_close_requested: false,
         };
 
@@ -1253,7 +1262,7 @@ impl State {
 
     fn apply_layout(&mut self) {
         let (w, h) = (self.width, self.height);
-        self.root_window.set_rect(0.0, 0.0, w, h);
+        self.window_rect = (0.0, 0.0, w, h);
         if self.mode == LauncherMode::Json {
             if let Some(jl) = &mut self.json_layout {
                 cce_ui::scale::set_scale_factor(self.scale as f32);
@@ -1269,26 +1278,17 @@ impl State {
         let sh = self.height;
         let mut verts = Vec::new();
 
-        // 1. Draw root_window background (with rounded corners if radius is set)
-        let bg_color = self.root_window.color();
-        if bg_color[3] > 0.0 {
-            let r = self.root_window.corner_radius();
-            let corners = self.root_window.rounded_corners();
-            let (wx, wy, ww, wh) = self.root_window.rect();
-            verts.extend(rounded_rect_vertices_corners(wx, wy, ww, wh, r, sw, sh, bg_color, corners));
+        // 1. Window background — the dissolved Backplate's exact emission: base color at
+        // the configured backplate opacity, all corners rounded when the radius is set.
+        let mut bg_color = self.window_bg;
+        if bg_color[3] > 0.001 {
+            bg_color[3] = cce_ui::color::active_backplate_opacity();
         }
-
-        // 2. Draw root_window border
-        if let Some((b_color, b_thickness)) = self.root_window.solid_border() {
-            let (wx, wy, ww, wh) = self.root_window.rect();
-            // Top border
-            verts.extend(quad_vertices(wx, wy, ww, b_thickness, sw, sh, b_color));
-            // Bottom border
-            verts.extend(quad_vertices(wx, wy + wh - b_thickness, ww, b_thickness, sw, sh, b_color));
-            // Left border
-            verts.extend(quad_vertices(wx, wy, b_thickness, wh, sw, sh, b_color));
-            // Right border
-            verts.extend(quad_vertices(wx + ww - b_thickness, wy, b_thickness, wh, sw, sh, b_color));
+        if bg_color[3] > 0.0 {
+            let r = self.window_radius;
+            let corners = if r > 0.1 { (true, true, true, true) } else { (false, false, false, false) };
+            let (wx, wy, ww, wh) = self.window_rect;
+            verts.extend(rounded_rect_vertices_corners(wx, wy, ww, wh, r, sw, sh, bg_color, corners));
         }
 
         // 3. Draw child widgets
@@ -1844,7 +1844,7 @@ impl PointerHandler for AppState {
                         let h_scroll = horizontal.absolute as f32;
                         let v_scroll = vertical.absolute as f32;
                         let delta = cce_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
-                        if st.fuzzel.scroll_box.mouse_wheel(&delta, st.cursor_x, st.cursor_y, &mut st.ui_context) {
+                        if st.fuzzel.scroll_box.wheel(&delta, st.cursor_x, st.cursor_y) {
                             st.fuzzel.update_scroll();
                             st.upload_vertices();
                             self.redraw = true;
@@ -3241,7 +3241,7 @@ impl FuzzelWidget {
         let item_h = 25.0;
         for (idx, item_text) in self.filtered_items.iter().enumerate() {
             let virtual_y = idx as f32 * item_h;
-            if let Some(draw_y) = self.scroll_box.get_item_draw_y(virtual_y, item_h) {
+            if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_y, item_h) {
                 let color = if idx == self.selected {
                     [0xff, 0xff, 0xff]
                 } else {
