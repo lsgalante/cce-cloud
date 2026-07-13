@@ -79,6 +79,16 @@ impl JsonControl {
             JsonControl::Slider(w) => w,
         }
     }
+
+    /// Drain the one-shot click flag (6bd value shrink — `take_click` left `WidgetHost`,
+    /// the drains are concrete `Adapted` methods). Only buttons carry one, and both call
+    /// sites already gate on the button widget type.
+    pub fn take_click(&mut self) -> bool {
+        match self {
+            JsonControl::Button(w) => w.take_click(),
+            _ => false,
+        }
+    }
 }
 
 pub struct JsonWidget {
@@ -484,7 +494,7 @@ impl JsonLayoutWidget {
                 if w.widget_type == "button" {
                     // take_click is an WidgetHost method; the Phase 5 Button is Adapted, so call it
                     // on the box directly rather than through a concrete downcast.
-                    if w.target_page.is_some() && w.widget.as_dyn_mut().take_click() {
+                    if w.target_page.is_some() && w.widget.take_click() {
                         page_switch = Some(w.target_page.unwrap());
                     }
                 }

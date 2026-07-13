@@ -1823,7 +1823,7 @@ impl PointerHandler for AppState {
                                     for w in &mut jl.widgets {
                                         // take_click is an WidgetHost method; Phase 5 Buttons are
                                         // Adapted, so ask the box directly.
-                                        if w.widget_type == "button" && w.widget.as_dyn_mut().take_click() {
+                                        if w.widget_type == "button" && w.widget.take_click() {
                                             clicked_btn_id = Some(w.id.clone());
                                             break;
                                         }
