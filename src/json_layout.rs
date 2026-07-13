@@ -407,9 +407,11 @@ impl JsonLayoutWidget {
             Event::PointerMove { x, y, .. } => {
                 if let Some(idx) = self.dragging_slider_idx {
                     if let Some(w) = self.widgets.get_mut(idx) {
-                        // drag_update is an WidgetHost method (the Adapted forward supplies the
-                        // widget's rect); call it on the box, not a concrete downcast.
-                        if w.widget.as_dyn_mut().drag_update(*x, *y) {
+                        // Drag* events map onto the Input drag hooks in handle_event (6bd
+                        // collapse); the ctx is unused on that path.
+                        let mut dummy = cce_ui::context::UiContext::new();
+                        let ev = Event::DragUpdate { dx: 0.0, dy: 0.0, x: *x, y: *y, local_x: *x, local_y: *y };
+                        if w.widget.as_dyn_mut().handle_event(&ev, &mut dummy) {
                             changed = true;
                         }
                     }
