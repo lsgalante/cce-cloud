@@ -1719,7 +1719,15 @@ impl PointerHandler for AppState {
                         if st.mode == LauncherMode::Json {
                             let mut changed = false;
                             if let Some(jl) = &mut st.json_layout {
-                                if jl.on_cursor_moved(event.position.0 as f32, event.position.1 as f32, &mut st.ui_context) {
+                                // Routed dispatch (6bd shrink): one Event through the router.
+                                let mv = cce_ui::widget::Event::PointerMove {
+                                    x: event.position.0 as f32,
+                                    y: event.position.1 as f32,
+                                    local_x: event.position.0 as f32,
+                                    local_y: event.position.1 as f32,
+                                };
+                                let ptr = jl.as_ptr_mut();
+                                if st.ui_context.propagate_event(&mv, ptr) {
                                     changed = true;
                                 }
                             }
@@ -1736,13 +1744,16 @@ impl PointerHandler for AppState {
                             if st.mode == LauncherMode::Json {
                                 let mut changed = false;
                                 if let Some(jl) = &mut st.json_layout {
-                                    if jl.mouse_input(
-                                        cce_ui::widget::MouseButton::Left,
-                                        cce_ui::widget::ElementState::Pressed,
-                                        event.position.0 as f32,
-                                        event.position.1 as f32,
-                                        &mut st.ui_context,
-                                    ) {
+                                    let ev = cce_ui::widget::Event::MouseButton {
+                                        button: cce_ui::widget::MouseButton::Left,
+                                        state: cce_ui::widget::ElementState::Pressed,
+                                        x: event.position.0 as f32,
+                                        y: event.position.1 as f32,
+                                        local_x: event.position.0 as f32,
+                                        local_y: event.position.1 as f32,
+                                    };
+                                    let ptr = jl.as_ptr_mut();
+                                    if st.ui_context.propagate_event(&ev, ptr) {
                                         changed = true;
                                     }
                                 }
@@ -1752,13 +1763,18 @@ impl PointerHandler for AppState {
                                 }
                             } else {
                                 let prev_selected = st.fuzzel.selected;
-                                let changed = st.fuzzel.mouse_input(
-                                    cce_ui::widget::MouseButton::Left,
-                                    cce_ui::widget::ElementState::Pressed,
-                                    event.position.0 as f32,
-                                    event.position.1 as f32,
-                                    &mut st.ui_context,
-                                );
+                                let changed = {
+                                    let ev = cce_ui::widget::Event::MouseButton {
+                                        button: cce_ui::widget::MouseButton::Left,
+                                        state: cce_ui::widget::ElementState::Pressed,
+                                        x: event.position.0 as f32,
+                                        y: event.position.1 as f32,
+                                        local_x: event.position.0 as f32,
+                                        local_y: event.position.1 as f32,
+                                    };
+                                    let ptr = st.fuzzel.as_ptr_mut();
+                                    st.ui_context.propagate_event(&ev, ptr)
+                                };
                                 if changed {
                                     if st.fuzzel.selected == prev_selected || st.switcher_mode || st.mode == LauncherMode::Dmenu {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
@@ -1792,13 +1808,16 @@ impl PointerHandler for AppState {
                                 let mut changed = false;
                                 let mut clicked_btn_id = None;
                                 if let Some(jl) = &mut st.json_layout {
-                                    if jl.mouse_input(
-                                        cce_ui::widget::MouseButton::Left,
-                                        cce_ui::widget::ElementState::Released,
-                                        event.position.0 as f32,
-                                        event.position.1 as f32,
-                                        &mut st.ui_context,
-                                    ) {
+                                    let ev = cce_ui::widget::Event::MouseButton {
+                                        button: cce_ui::widget::MouseButton::Left,
+                                        state: cce_ui::widget::ElementState::Released,
+                                        x: event.position.0 as f32,
+                                        y: event.position.1 as f32,
+                                        local_x: event.position.0 as f32,
+                                        local_y: event.position.1 as f32,
+                                    };
+                                    let ptr = jl.as_ptr_mut();
+                                    if st.ui_context.propagate_event(&ev, ptr) {
                                         changed = true;
                                     }
                                     for w in &mut jl.widgets {
@@ -2134,7 +2153,9 @@ impl AppState {
                     shift: false,
                 };
                 if let Some(jl) = &mut st.json_layout {
-                    if jl.keyboard_input(&key_event, &mut st.ui_context) {
+                    let kev = cce_ui::widget::Event::KeyInput(key_event.clone());
+                    let ptr = jl.as_ptr_mut();
+                    if st.ui_context.propagate_event(&kev, ptr) {
                         widget_handled = true;
                         st.upload_vertices();
                         self.redraw = true;
