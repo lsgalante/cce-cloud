@@ -1726,8 +1726,9 @@ impl PointerHandler for AppState {
                                     local_x: event.position.0 as f32,
                                     local_y: event.position.1 as f32,
                                 };
-                                let ptr = jl.as_ptr_mut();
-                                if st.ui_context.propagate_event(&mv, ptr) {
+                                let root = jl.id();
+                                st.ui_context.register_widget(root, jl.as_ptr_mut());
+                                if st.ui_context.propagate_event(&mv, root) {
                                     changed = true;
                                 }
                             }
@@ -1752,8 +1753,9 @@ impl PointerHandler for AppState {
                                         local_x: event.position.0 as f32,
                                         local_y: event.position.1 as f32,
                                     };
-                                    let ptr = jl.as_ptr_mut();
-                                    if st.ui_context.propagate_event(&ev, ptr) {
+                                    let root = jl.id();
+                                    st.ui_context.register_widget(root, jl.as_ptr_mut());
+                                    if st.ui_context.propagate_event(&ev, root) {
                                         changed = true;
                                     }
                                 }
@@ -1772,8 +1774,9 @@ impl PointerHandler for AppState {
                                         local_x: event.position.0 as f32,
                                         local_y: event.position.1 as f32,
                                     };
-                                    let ptr = st.fuzzel.as_ptr_mut();
-                                    st.ui_context.propagate_event(&ev, ptr)
+                                    let root = st.fuzzel.id();
+                                    st.ui_context.register_widget(root, st.fuzzel.as_ptr_mut());
+                                    st.ui_context.propagate_event(&ev, root)
                                 };
                                 if changed {
                                     if st.fuzzel.selected == prev_selected || st.switcher_mode || st.mode == LauncherMode::Dmenu {
@@ -1816,8 +1819,9 @@ impl PointerHandler for AppState {
                                         local_x: event.position.0 as f32,
                                         local_y: event.position.1 as f32,
                                     };
-                                    let ptr = jl.as_ptr_mut();
-                                    if st.ui_context.propagate_event(&ev, ptr) {
+                                    let root = jl.id();
+                                    st.ui_context.register_widget(root, jl.as_ptr_mut());
+                                    if st.ui_context.propagate_event(&ev, root) {
                                         changed = true;
                                     }
                                     for w in &mut jl.widgets {
@@ -2154,8 +2158,9 @@ impl AppState {
                 };
                 if let Some(jl) = &mut st.json_layout {
                     let kev = cce_ui::widget::Event::KeyInput(key_event.clone());
-                    let ptr = jl.as_ptr_mut();
-                    if st.ui_context.propagate_event(&kev, ptr) {
+                    let root = jl.id();
+                    st.ui_context.register_widget(root, jl.as_ptr_mut());
+                    if st.ui_context.propagate_event(&kev, root) {
                         widget_handled = true;
                         st.upload_vertices();
                         self.redraw = true;
