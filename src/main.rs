@@ -42,10 +42,9 @@ use wayland_client::{
 };
 use calloop_wayland_source::WaylandSource;
 
-use glyphon::{
-    Attrs, Buffer, Cache, FontSystem, Metrics, Resolution, SwashCache, TextArea, TextAtlas,
-    TextBounds, TextRenderer, Viewport,
-};
+use glyphon::{Attrs, Buffer, FontSystem, Metrics, SwashCache};
+
+use cce_ui::vk::{TextSpan, VkRenderer};
 
 // Vertex and quad_vertices are shared from the cce-ui engine.
 pub(crate) use cce_ui::engine::{quad_vertices, Vertex};
@@ -693,21 +692,15 @@ enum AppWindow {
 struct State {
     window: Option<AppWindow>,
     wl_surface: wl_surface::WlSurface,
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    render_pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    vertex_count: u32,
+    // Option: dropped explicitly in Drop, before the wl_surface is destroyed
+    // (the swapchain must not outlive its Wayland surface).
+    renderer: Option<VkRenderer>,
+    vertex_data: Vec<Vertex>,
 
     fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
     json_layout: Option<cce_ui::widget::Adapted<JsonLayoutWidget>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    text_atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    text_viewport: Viewport,
 
     cursor_x: f32,
     cursor_y: f32,
@@ -738,7 +731,7 @@ struct State {
 }
 
 impl State {
-    async fn new(
+    fn new(
         conn: &Connection,
         qh: &QueueHandle<AppState>,
         compositor_state: &CompositorState,
@@ -893,125 +886,24 @@ impl State {
             AppWindow::Layer(layer_window)
         };
 
-        let wayland_handle = Box::leak(Box::new(cce_ui::wayland::WaylandSurfaceHandle {
-            display_ptr: conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
-            surface_ptr: wl_surface.id().as_ptr() as *mut std::ffi::c_void,
-        }));
-
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
-            ..Default::default()
-        });
-
-        let surface = instance
-            .create_surface(wayland_handle)
-            .expect("Failed to create surface");
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("Failed to find adapter");
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("GPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                },
-                None,
+        // Raw-Vulkan renderer on the same display/surface pointers the wgpu
+        // stack used. Corner radius 0: the window background tessellates its own
+        // rounded corners (rounded_rect_vertices_corners).
+        let renderer = unsafe {
+            VkRenderer::new(
+                conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
+                wl_surface.id().as_ptr() as *mut std::ffi::c_void,
+                pw,
+                ph,
+                0.0,
             )
-            .await
-            .expect("Failed to create device");
-
-        let mut config = surface
-            .get_default_config(&adapter, pw, ph)
-            .expect("Failed to get surface config");
-
-        let capabilities = surface.get_capabilities(&adapter);
-        let alpha_mode = if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-            wgpu::CompositeAlphaMode::PreMultiplied
-        } else if capabilities.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
-            wgpu::CompositeAlphaMode::PostMultiplied
-        } else {
-            capabilities.alpha_modes[0]
         };
-        config.alpha_mode = alpha_mode;
-        surface.configure(&device, &config);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(cce_ui::SHADER.into()),
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Vertex::desc()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview: None,
-            cache: None,
-        });
 
         let font_system = cce_ui::create_font_system();
         let swash_cache = SwashCache::new();
-        let cache = Cache::new(&device);
-        let mut text_atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer = TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
-
-        let mut text_viewport = Viewport::new(&device, &cache);
-        text_viewport.update(&queue, Resolution { width: pw, height: ph });
 
         let mut fuzzel = FuzzelWidget::new(prompt);
         fuzzel.set_rect(0.0, 0.0, lw, lh);
-
-        let vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Vertex Buffer"),
-            size: 1,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
 
         let stdin_state = Arc::new(Mutex::new(StdinState {
             items: Vec::new(),
@@ -1080,20 +972,12 @@ impl State {
         let mut state = Self {
             window: Some(window),
             wl_surface,
-            surface,
-            device,
-            queue,
-            config,
-            render_pipeline,
-            vertex_buffer,
-            vertex_count: 0,
+            renderer: Some(renderer),
+            vertex_data: Vec::new(),
             fuzzel,
             json_layout,
             font_system,
             swash_cache,
-            text_atlas,
-            text_renderer,
-            text_viewport,
             cursor_x: 0.0,
             cursor_y: 0.0,
             width: lw,
@@ -1327,93 +1211,55 @@ impl State {
                 v.color[3] *= self.fade_factor;
             }
         }
-        self.vertex_count = verts.len() as u32;
-        if self.vertex_count == 0 {
-            return;
-        }
-        let data = bytemuck::cast_slice(&verts);
-        let needed = data.len() as wgpu::BufferAddress;
-        if needed > self.vertex_buffer.size() {
-            self.vertex_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Vertex Buffer"),
-                size: needed,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-        }
-        self.queue.write_buffer(&self.vertex_buffer, 0, data);
+        // The GPU upload happens in VkRenderer::draw_frame, which consumes
+        // vertex_data every frame.
+        self.vertex_data = verts;
     }
 
     fn prepare_text(&mut self) {
-        let Self {
-            ref mut text_renderer,
-            ref device,
-            ref queue,
-            ref mut font_system,
-            ref mut text_atlas,
-            ref mut text_viewport,
-            ref mut swash_cache,
-            physical_width,
-            physical_height,
-            scale,
-            ref fuzzel,
-            ref json_layout,
-            ref mode,
-            ref ui_context,
-            ..
-        } = self;
+        let scale_f32 = self.scale as f32;
 
-        let viewport = Resolution { width: *physical_width, height: *physical_height };
-        text_viewport.update(queue, viewport);
-
-        let scale_f32 = *scale as f32;
-
-        let mut areas: Vec<TextArea> = Vec::new();
-        let mut widget_buffers: Vec<Buffer> = Vec::new();
         let mut widget_labels: Vec<TextLabel> = Vec::new();
-
-        let is_json_mode = *mode == LauncherMode::Json;
-        if is_json_mode {
-            if let Some(jl) = json_layout {
-                widget_labels.extend(walk_text_labels(ui_context, jl));
+        if self.mode == LauncherMode::Json {
+            if let Some(jl) = &self.json_layout {
+                widget_labels.extend(walk_text_labels(&self.ui_context, jl));
             }
         } else {
-            widget_labels.extend(walk_text_labels(ui_context, fuzzel));
+            widget_labels.extend(walk_text_labels(&self.ui_context, &self.fuzzel));
         }
 
+        let mut buffers: Vec<Buffer> = Vec::with_capacity(widget_labels.len());
         for label in &widget_labels {
-            widget_buffers.push(make_text_buffer(font_system, &label.text, label.font_size));
+            buffers.push(make_text_buffer(&mut self.font_system, &label.text, label.font_size));
         }
 
-        for (buf, label) in widget_buffers.iter().zip(widget_labels.iter()) {
-            let left = (label.x * scale_f32).round();
-            let top = (label.y * scale_f32).round();
-            let scale = scale_f32;
-            let default_color = if self.fade_factor < 1.0 {
-                let alpha = (self.fade_factor * 255.0) as u8;
-                glyphon::Color::rgba(label.color[0], label.color[1], label.color[2], alpha)
-            } else {
-                glyphon::Color::rgb(label.color[0], label.color[1], label.color[2])
-            };
-            areas.push(TextArea {
+        let alpha = self.fade_factor.clamp(0.0, 1.0);
+        let spans: Vec<TextSpan> = buffers
+            .iter()
+            .zip(widget_labels.iter())
+            .map(|(buf, label)| TextSpan {
                 buffer: buf,
-                left,
-                top,
-                scale,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: *physical_width as i32,
-                    bottom: *physical_height as i32,
-                },
-                default_color,
-                custom_glyphs: &[],
-            });
-        }
+                left: (label.x * scale_f32).round(),
+                top: (label.y * scale_f32).round(),
+                // Buffers are shaped at logical size; the span scales to physical.
+                scale: scale_f32,
+                bounds: None,
+                default_color: [
+                    label.color[0] as f32 / 255.0,
+                    label.color[1] as f32 / 255.0,
+                    label.color[2] as f32 / 255.0,
+                    alpha,
+                ],
+                rotation: None,
+                clip_circle: [0.0; 3],
+            })
+            .collect();
 
-        text_renderer
-            .prepare(device, queue, font_system, text_atlas, text_viewport, areas, swash_cache)
-            .unwrap();
+        self.renderer.as_mut().unwrap().prepare_text(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &spans,
+        );
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -1422,9 +1268,7 @@ impl State {
             self.physical_height = height;
             self.width = width as f32 / self.scale as f32;
             self.height = height as f32 / self.scale as f32;
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+            self.renderer.as_mut().unwrap().resize(width, height);
             self.apply_layout();
             self.upload_vertices();
         }
@@ -1437,61 +1281,16 @@ impl State {
         self.fade_factor = fade_factor;
         self.upload_vertices();
         self.prepare_text();
-
-        let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.config);
-                return false;
-            }
-            Err(wgpu::SurfaceError::Timeout) => return false,
-            Err(e) => {
-                log::error!("Surface error: {e:?}");
-                return false;
-            }
-        };
-
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Encoder"),
-        });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0, g: 0.0, b: 0.0, a: 0.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            if self.vertex_count > 0 {
-                pass.set_pipeline(&self.render_pipeline);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.vertex_count, 0..1);
-            }
-
-            self.text_renderer.render(&self.text_atlas, &self.text_viewport, &mut pass).unwrap();
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
+        self.renderer.as_mut().unwrap().draw_frame(&self.vertex_data);
         false
     }
 }
 
 impl Drop for State {
     fn drop(&mut self) {
+        // Swapchain/device teardown must precede the wl_surface's destruction
+        // (daemon mode churns States, one per popup).
+        self.renderer.take();
         self.window.take();
         self.wl_surface.destroy();
     }
@@ -2414,7 +2213,7 @@ fn run_standalone() {
     let use_xdg = cce_wm.is_some() && xdg_shell_state.is_some() && x_pos.is_none() && y_pos.is_none();
     log::info!("Starting launcher window: x_pos={:?}, y_pos={:?}, align_right={}, scale={}, use_xdg={}", x_pos, y_pos, align_right, scale, use_xdg);
 
-    let (state, cce_toplevel) = pollster::block_on(State::new(
+    let (state, cce_toplevel) = State::new(
         &conn,
         &qh,
         &app.compositor_state,
@@ -2433,7 +2232,7 @@ fn run_standalone() {
         switcher_mode,
         json_layout_config,
         parent_app_id,
-    ));
+    );
 
     app.window = state.window.clone();
     app.surface = Some(state.wl_surface.clone());
@@ -2899,7 +2698,7 @@ fn run_daemon(socket_path: &str) {
         app.switcher_mode = switcher_mode;
         app.selected_item = None;
 
-        let (state, cce_toplevel) = pollster::block_on(State::new(
+        let (state, cce_toplevel) = State::new(
             &conn_clone,
             &qh,
             &app.compositor_state,
@@ -2918,7 +2717,7 @@ fn run_daemon(socket_path: &str) {
             switcher_mode,
             json_layout_config,
             parent_app_id,
-        ));
+        );
 
         app.window = state.window.clone();
         app.surface = Some(state.wl_surface.clone());
