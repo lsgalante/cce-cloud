@@ -2666,10 +2666,17 @@ fn run_daemon(socket_path: &str) {
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
 
-    for stream in listener.incoming() {
-        let mut stream = match stream {
-            Ok(s) => s,
-            Err(_) => continue,
+    let mut pending: Option<std::os::unix::net::UnixStream> = None;
+    loop {
+        let mut stream = match pending.take() {
+            Some(s) => s,
+            None => {
+                let _ = listener.set_nonblocking(false);
+                match listener.accept() {
+                    Ok((s, _)) => s,
+                    Err(_) => continue,
+                }
+            }
         };
 
         let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
@@ -2928,6 +2935,9 @@ fn run_daemon(socket_path: &str) {
         // so fire one signal to make the channel handler ingest them.
         let _ = stdin_sender.send(());
 
+        // Watch for preempting connections while the popup is open.
+        let _ = listener.set_nonblocking(true);
+
         let mut last_tick = std::time::Instant::now();
         while !app.exit {
             if app.fade_out {
@@ -2950,6 +2960,14 @@ fn run_daemon(socket_path: &str) {
             event_loop.dispatch(timeout, &mut app).unwrap();
 
             if app.exit {
+                break;
+            }
+
+            // A new client preempts the current popup: global single-popup
+            // semantics, even when the two popups are owned by different
+            // bar module processes that can't see each other's state.
+            if let Ok((s, _)) = listener.accept() {
+                pending = Some(s);
                 break;
             }
 
