@@ -2913,9 +2913,6 @@ fn run_daemon(socket_path: &str) {
             parent_app_id,
         ));
 
-        if let Some(ref mut st) = app.state {
-            st.stdin_state = stdin_state.clone();
-        }
         app.window = state.window.clone();
         app.surface = Some(state.wl_surface.clone());
         app.cce_toplevel = cce_toplevel;
@@ -2925,6 +2922,11 @@ fn run_daemon(socket_path: &str) {
         app.fade_out = false;
         app.fade_start = None;
         app.fade_factor = 1.0;
+
+        // The reader thread only signals for lines that arrive after this
+        // point; the initial_stdin items are already sitting in stdin_state,
+        // so fire one signal to make the channel handler ingest them.
+        let _ = stdin_sender.send(());
 
         let mut last_tick = std::time::Instant::now();
         while !app.exit {
