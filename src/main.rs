@@ -675,6 +675,10 @@ struct StdinState {
     new_data: bool,
     cycle_next: usize,
     select_and_close: bool,
+    // daemon mode: the requesting client hung up (killed/crashed) — the
+    // popup has no owner left and must close, or the serial accept loop
+    // in run_daemon stays wedged on it forever
+    client_gone: bool,
 }
 
 
@@ -1014,6 +1018,7 @@ impl State {
             new_data: false,
             cycle_next: 0,
             select_and_close: false,
+            client_gone: false,
         }));
 
         let mut apps = Vec::new();
@@ -2804,6 +2809,7 @@ fn run_daemon(socket_path: &str) {
             new_data: !initial_stdin.is_empty(),
             cycle_next: 0,
             select_and_close: false,
+            client_gone: false,
         }));
 
         let stdin_state_clone = stdin_state.clone();
@@ -2832,11 +2838,28 @@ fn run_daemon(socket_path: &str) {
                 let _ = stdin_sender_clone.send(());
                 line.clear();
             }
+            // EOF/error: the client hung up. Tell the event loop so the
+            // popup closes instead of wedging the accept loop. (The normal
+            // service-end path also lands here via shutdown(Read); by then
+            // the channel source is already removed, so the send is inert.)
+            if let Ok(mut lock_state) = stdin_state_clone.lock() {
+                lock_state.client_gone = true;
+            }
+            let _ = stdin_sender_clone.send(());
         });
 
         let stdin_state_for_handler = stdin_state.clone();
         let registration_token = loop_handle.insert_source(stdin_channel, move |event, _metadata, app_state: &mut AppState| {
             if let calloop::channel::Event::Msg(()) = event {
+                if stdin_state_for_handler
+                    .lock()
+                    .map(|s| s.client_gone)
+                    .unwrap_or(false)
+                {
+                    log::info!("client disconnected, closing popup");
+                    app_state.exit = true;
+                    return;
+                }
                 let mut select_and_close = false;
                 if let Some(st) = &mut app_state.state {
                     if let (Ok(mut lock_daemon), Ok(mut lock_state)) = (stdin_state_for_handler.lock(), st.stdin_state.lock()) {
