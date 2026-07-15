@@ -2833,10 +2833,13 @@ fn main() {
 
     let uid = unsafe { libc::getuid() };
     let socket_dir = format!("/run/user/{}", uid);
+    // Key the socket by display so a nested/second compositor session gets its
+    // own daemon instead of hijacking (or being hijacked by) another session's.
+    let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
     let socket_path = if std::path::Path::new(&socket_dir).exists() {
-        format!("{}/cce-cloud.socket", socket_dir)
+        format!("{}/cce-cloud-{}.socket", socket_dir, display)
     } else {
-        format!("/tmp/cce-cloud-{}.socket", uid)
+        format!("/tmp/cce-cloud-{}-{}.socket", uid, display)
     };
 
     if is_daemon {
