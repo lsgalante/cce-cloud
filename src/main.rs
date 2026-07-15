@@ -750,7 +750,9 @@ impl State {
         switcher_mode: bool,
         json_layout_config: Option<JsonLayoutConfig>,
         parent_app_id: Option<String>,
+        fonts: Option<(FontSystem, SwashCache)>,
     ) -> (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>) {
+        let t_start = std::time::Instant::now();
         cce_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Json {
             if let Some(ref config) = json_layout_config {
@@ -836,7 +838,9 @@ impl State {
         let ph = (height as f64 * scale) as u32;
         let lw = width as f32;
         let lh = height as f32;
+        log::debug!("[timing] size estimation: {:?}", t_start.elapsed());
 
+        let t = std::time::Instant::now();
         let wl_surface = compositor_state.create_surface(qh);
         wl_surface.set_buffer_scale(scale as i32);
         let app_id = if let Some(ref parent) = parent_app_id {
@@ -886,9 +890,12 @@ impl State {
             AppWindow::Layer(layer_window)
         };
 
+        log::debug!("[timing] surface/window setup: {:?}", t.elapsed());
+
         // Raw-Vulkan renderer on the same display/surface pointers the wgpu
         // stack used. Corner radius 0: the window background tessellates its own
         // rounded corners (rounded_rect_vertices_corners).
+        let t = std::time::Instant::now();
         let renderer = unsafe {
             VkRenderer::new(
                 conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
@@ -898,9 +905,14 @@ impl State {
                 0.0,
             )
         };
+        log::debug!("[timing] VkRenderer::new: {:?}", t.elapsed());
 
-        let font_system = cce_ui::create_font_system();
-        let swash_cache = SwashCache::new();
+        // Reuse the daemon's font system across popups (a rebuild re-scans the
+        // fonts dir and loses the shaping caches).
+        let t = std::time::Instant::now();
+        let (font_system, swash_cache) =
+            fonts.unwrap_or_else(|| (cce_ui::create_font_system(), SwashCache::new()));
+        log::debug!("[timing] font system: {:?}", t.elapsed());
 
         let mut fuzzel = FuzzelWidget::new(prompt);
         fuzzel.set_rect(0.0, 0.0, lw, lh);
@@ -1002,10 +1014,13 @@ impl State {
             select_and_close_requested: false,
         };
 
+        let t = std::time::Instant::now();
         state.check_stdin_updates();
         state.update_desired_size();
         state.apply_layout();
         state.upload_vertices();
+        log::debug!("[timing] initial layout/upload: {:?}", t.elapsed());
+        log::debug!("[timing] State::new total: {:?}", t_start.elapsed());
         (state, cce_toplevel)
     }
 
@@ -2232,6 +2247,7 @@ fn run_standalone() {
         switcher_mode,
         json_layout_config,
         parent_app_id,
+        None,
     );
 
     app.window = state.window.clone();
@@ -2419,6 +2435,16 @@ fn run_daemon(socket_path: &str) {
 
     log::info!("cce-cloud daemon started, listening on {}", socket_path);
 
+    // Pay the window-independent startup costs now (login time), not on the
+    // first popup: Vulkan driver + shader compiles, and the fonts-dir scan.
+    // The font system is then reused across popups (each State hands it back).
+    let t_prewarm = std::time::Instant::now();
+    cce_ui::vk::prewarm();
+    let mut fonts_slot: Option<(FontSystem, SwashCache)> =
+        Some((cce_ui::create_font_system(), SwashCache::new()));
+    let _ = cce_ui::widget::get_font_db(); // measure_text's resvg fontdb (system-font scan)
+    log::info!("[timing] daemon prewarm: {:?}", t_prewarm.elapsed());
+
     let conn = Connection::connect_to_env().unwrap();
     let conn_clone = conn.clone();
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
@@ -2485,6 +2511,7 @@ fn run_daemon(socket_path: &str) {
         if reader.read_line(&mut initial_line).is_err() {
             continue;
         }
+        let t_request = std::time::Instant::now();
 
         let payload: serde_json::Value = match serde_json::from_str(&initial_line) {
             Ok(p) => p,
@@ -2717,6 +2744,7 @@ fn run_daemon(socket_path: &str) {
             switcher_mode,
             json_layout_config,
             parent_app_id,
+            fonts_slot.take(),
         );
 
         app.window = state.window.clone();
@@ -2737,6 +2765,8 @@ fn run_daemon(socket_path: &str) {
         // Watch for preempting connections while the popup is open.
         let _ = listener.set_nonblocking(true);
 
+        log::debug!("[timing] request -> popup ready: {:?}", t_request.elapsed());
+        let mut first_frame_logged = false;
         let mut last_tick = std::time::Instant::now();
         while !app.exit {
             if app.fade_out {
@@ -2788,6 +2818,10 @@ fn run_daemon(socket_path: &str) {
                 app.redraw = false;
                 if let Some(st) = &mut app.state {
                     let _ = st.render(app.fade_factor);
+                    if !first_frame_logged {
+                        first_frame_logged = true;
+                        log::info!("[timing] request -> first frame: {:?}", t_request.elapsed());
+                    }
                 }
             }
         }
@@ -2809,6 +2843,17 @@ fn run_daemon(socket_path: &str) {
                 }
             }
             st.wl_surface.commit();
+            // Take the font system back for the next popup (State has a Drop
+            // impl, so swap rather than move; the placeholder is never used).
+            let fs = std::mem::replace(
+                &mut st.font_system,
+                FontSystem::new_with_locale_and_db(
+                    "en-US".to_string(),
+                    glyphon::cosmic_text::fontdb::Database::new(),
+                ),
+            );
+            let sc = std::mem::replace(&mut st.swash_cache, SwashCache::new());
+            fonts_slot = Some((fs, sc));
         }
         app.window = None;
         app.surface = None;
