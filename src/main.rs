@@ -2814,6 +2814,12 @@ fn run_daemon(socket_path: &str) {
         app.surface = None;
         app.state = None;
         app.cce_toplevel = None;
+
+        // Dropping the State only queues wl_surface.destroy() on the
+        // connection; the blocking accept() below would leave it unsent and
+        // the compositor would keep showing the dead popup until the next
+        // client connects.
+        let _ = conn_clone.flush();
     }
 }
 
