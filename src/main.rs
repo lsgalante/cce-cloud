@@ -1940,6 +1940,7 @@ impl AppState {
             return;
         }
 
+        let (select_next, select_prev) = *nav_keys();
         let logical_key = match event.keysym {
             xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
             xkeysym::Keysym::Return => Key::Named(NamedKey::Enter),
@@ -1951,8 +1952,8 @@ impl AppState {
             xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
             xkeysym::Keysym::Delete => Key::Named(NamedKey::Delete),
             xkeysym::Keysym::space => Key::Named(NamedKey::Space),
-            xkeysym::Keysym::n if self.ctrl_pressed => Key::Named(NamedKey::ArrowDown),
-            xkeysym::Keysym::p if self.ctrl_pressed => Key::Named(NamedKey::ArrowUp),
+            sym if nav_matches(select_next, self.ctrl_pressed, sym) => Key::Named(NamedKey::ArrowDown),
+            sym if nav_matches(select_prev, self.ctrl_pressed, sym) => Key::Named(NamedKey::ArrowUp),
             _ => {
                 if let Some(ref text) = event.utf8 {
                     Key::Character(text.clone())
@@ -2865,6 +2866,48 @@ fn run_daemon(socket_path: &str) {
         // the compositor would keep showing the dead popup until the next
         // client connects.
         let _ = conn_clone.flush();
+    }
+}
+
+/// A launcher list-nav chord parsed to (needs_ctrl, key char). This app
+/// handles keys at the raw keysym layer, so only single-character keys
+/// (optionally with ctrl) are supported here.
+fn chord_ctrl_char(chord: &str) -> Option<(bool, char)> {
+    let mut ctrl = false;
+    let mut segs = chord.split('+').map(str::trim);
+    let key = segs.next_back()?;
+    for seg in segs {
+        match seg.to_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            _ => return None,
+        }
+    }
+    let mut chars = key.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some((ctrl, c.to_ascii_lowercase()))
+}
+
+/// input.kdl `cce-cloud` domain: select_next / select_prev (emacs-style
+/// ctrl+n / ctrl+p defaults), resolved once per process.
+fn nav_keys() -> &'static (Option<(bool, char)>, Option<(bool, char)>) {
+    static KEYS: std::sync::OnceLock<(Option<(bool, char)>, Option<(bool, char)>)> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        (
+            chord_ctrl_char(&cce_ui::input::app_chord("select_next", "ctrl+n")),
+            chord_ctrl_char(&cce_ui::input::app_chord("select_prev", "ctrl+p")),
+        )
+    })
+}
+
+fn nav_matches(spec: Option<(bool, char)>, ctrl_pressed: bool, sym: xkeysym::Keysym) -> bool {
+    match spec {
+        Some((need_ctrl, c)) => {
+            ctrl_pressed == need_ctrl && sym.key_char().map(|k| k.to_ascii_lowercase()) == Some(c)
+        }
+        None => false,
     }
 }
 
