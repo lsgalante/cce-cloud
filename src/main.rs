@@ -1267,6 +1267,7 @@ impl State {
                 ],
                 rotation: None,
                 clip_circle: [0.0; 3],
+                clip_extents: [0.0; 2],
             })
             .collect();
 
