@@ -730,6 +730,28 @@ struct State {
     select_and_close_requested: bool,
 }
 
+/// Logical-px width one JSON-layout widget wants for the auto-sizing popup.
+///
+/// Buttons are the subtlety: `cce_ui::widget::Button` draws its label with an 8px inset on
+/// each side (see `Button::paint`) in the *button* font — not the menubar font `measure_text`
+/// assumes. So measure the label the way the button itself does (`measure_text_width` in the
+/// button font/size) and budget the button's 16px of inset on top of the container's 16px-per-
+/// side margins; otherwise a left-justified label starts 8px in and spills past the button's
+/// right edge (`JsonLayoutWidget::layout_children` sets `usable_w = width - 32`).
+fn json_widget_desired_width(widget_type: &str, text: &str) -> f32 {
+    match widget_type {
+        "button" => {
+            let (family, size) = cce_ui::layout::parse_font_string(&cce_ui::layout::button_font());
+            cce_ui::widget::display::measure_text_width(text, &family, size.unwrap_or(12.0)) + 48.0
+        }
+        "label" => cce_ui::widget::display::measure_text(text, 13.0) + 32.0,
+        "checkbox" => cce_ui::widget::display::measure_text(text, 13.0) + 44.0,
+        "spinbox" | "color" => cce_ui::widget::display::measure_text(text, 13.0) + 120.0,
+        "slider" => cce_ui::widget::display::measure_text(text, 13.0) + 160.0,
+        _ => 150.0,
+    }
+}
+
 impl State {
     fn new(
         conn: &Connection,
@@ -760,13 +782,7 @@ impl State {
                     let mut max_widget_w = 120.0f32; // fallback minimum
                     if let Some(ref widgets) = config.widgets {
                         for w_conf in widgets {
-                            let w_w = match w_conf.widget_type.as_str() {
-                                "button" | "label" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 32.0,
-                                "checkbox" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 44.0,
-                                "spinbox" | "color" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 120.0,
-                                "slider" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 160.0,
-                                _ => 150.0,
-                            };
+                            let w_w = json_widget_desired_width(&w_conf.widget_type, &w_conf.text);
                             if w_w > max_widget_w {
                                 max_widget_w = w_w;
                             }
@@ -774,13 +790,7 @@ impl State {
                     } else if let Some(ref pages) = config.pages {
                         for page in pages {
                             for w_conf in &page.widgets {
-                                let w_w = match w_conf.widget_type.as_str() {
-                                    "button" | "label" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 32.0,
-                                    "checkbox" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 44.0,
-                                    "spinbox" | "color" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 120.0,
-                                    "slider" => cce_ui::widget::display::measure_text(&w_conf.text, 13.0) + 160.0,
-                                    _ => 150.0,
-                                };
+                                let w_w = json_widget_desired_width(&w_conf.widget_type, &w_conf.text);
                                 if w_w > max_widget_w {
                                     max_widget_w = w_w;
                                 }
@@ -1080,13 +1090,7 @@ impl State {
                     if w.page_idx != active_page {
                         continue;
                     }
-                    let w_w = match w.widget_type.as_str() {
-                        "button" | "label" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 32.0,
-                        "checkbox" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 44.0,
-                        "spinbox" | "color" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 120.0,
-                        "slider" => cce_ui::widget::display::measure_text(&w.text, 13.0) + 160.0,
-                        _ => 150.0,
-                    };
+                    let w_w = json_widget_desired_width(&w.widget_type, &w.text);
                     if w_w > max_widget_w {
                         max_widget_w = w_w;
                     }
@@ -2947,6 +2951,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn button_width_covers_label_inset() {
+        // Regression: a left-justified Button draws its label 8px in from its own left edge
+        // (Button::paint) in the button font. layout_children gives the button
+        // `usable_w = popup_width - 32`. If the popup width doesn't budget the button's
+        // 8px-per-side inset, the label spills past the button's right edge — the desktop
+        // context-menu bug. Every desktop-menu label must fit within usable_w with the inset.
+        let (family, size) = cce_ui::layout::parse_font_string(&cce_ui::layout::button_font());
+        let size = size.unwrap_or(12.0);
+        for label in [
+            "Terminal", "Files", "Data Editor", "Applications",
+            "System Settings", "Expose Windows", "Reload Config", "Logout",
+        ] {
+            let popup_w = json_widget_desired_width("button", label);
+            let usable_w = popup_w - 32.0; // container margins, per layout_children
+            let label_w = cce_ui::widget::display::measure_text_width(label, &family, size);
+            // 8px left inset + label + 8px right breathing room must fit the button.
+            assert!(
+                usable_w >= label_w + 16.0,
+                "button '{label}': usable_w {usable_w} < label {label_w} + 16 inset",
+            );
+        }
+    }
 
     #[test]
     fn test_json_layout_parsing() {
