@@ -344,13 +344,15 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
 
 fn scan_apps() -> Vec<AppInfo> {
     let mut apps = Vec::new();
-    let mut dirs = vec![
-        std::path::PathBuf::from("/usr/share/applications"),
-        std::path::PathBuf::from("/usr/local/share/applications"),
-    ];
+    // XDG precedence: user entries override system ones. The stable sort +
+    // dedup below keeps the first-pushed entry per name, so scan
+    // highest-priority dirs first.
+    let mut dirs = Vec::new();
     if let Ok(home) = std::env::var("HOME") {
         dirs.push(std::path::PathBuf::from(home).join(".local/share/applications"));
     }
+    dirs.push(std::path::PathBuf::from("/usr/local/share/applications"));
+    dirs.push(std::path::PathBuf::from("/usr/share/applications"));
 
     for dir in dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
@@ -673,6 +675,7 @@ struct StdinState {
     items: Vec<String>,
     new_data: bool,
     cycle_next: usize,
+    cycle_prev: usize,
     select_and_close: bool,
     // daemon mode: the requesting client hung up (killed/crashed) — the
     // popup has no owner left and must close, or the serial accept loop
@@ -931,6 +934,7 @@ impl State {
             items: Vec::new(),
             new_data: false,
             cycle_next: 0,
+            cycle_prev: 0,
             select_and_close: false,
             client_gone: false,
         }));
@@ -945,6 +949,9 @@ impl State {
                         if let Ok(mut lock_state) = stdin_state_clone.lock() {
                             if line == "__cce_switcher_next__" {
                                 lock_state.cycle_next += 1;
+                                lock_state.new_data = true;
+                            } else if line == "__cce_switcher_prev__" {
+                                lock_state.cycle_prev += 1;
                                 lock_state.new_data = true;
                             } else if line == "__cce_switcher_select_and_close__" {
                                 lock_state.select_and_close = true;
@@ -1046,6 +1053,8 @@ impl State {
 
                 let cycles = lock.cycle_next;
                 lock.cycle_next = 0;
+                let cycles_back = lock.cycle_prev;
+                lock.cycle_prev = 0;
 
                 let mut changed = false;
                 let items = lock.items.clone();
@@ -1067,8 +1076,11 @@ impl State {
                     }
                 }
 
-                if cycles > 0 && !self.fuzzel.filtered_items.is_empty() {
-                    self.fuzzel.selected = (self.fuzzel.selected + cycles) % self.fuzzel.filtered_items.len();
+                if (cycles > 0 || cycles_back > 0) && !self.fuzzel.filtered_items.is_empty() {
+                    let len = self.fuzzel.filtered_items.len() as isize;
+                    let net = cycles as isize - cycles_back as isize;
+                    self.fuzzel.selected =
+                        (self.fuzzel.selected as isize + net).rem_euclid(len) as usize;
                     self.fuzzel.update_scroll();
                     self.fuzzel.snap_to_selected();
                     changed = true;
@@ -1945,6 +1957,22 @@ impl AppState {
             return;
         }
 
+        // Shift+Tab arrives as ISO_Left_Tab: cycle the highlight backwards
+        // with wrap, mirroring Tab's forward cycle below.
+        if event.keysym == xkeysym::Keysym::ISO_Left_Tab {
+            if let Some(st) = &mut self.state {
+                if st.mode != LauncherMode::Json && !st.fuzzel.filtered_items.is_empty() {
+                    let len = st.fuzzel.filtered_items.len();
+                    st.fuzzel.selected = (st.fuzzel.selected + len - 1) % len;
+                    st.fuzzel.update_scroll();
+                    st.fuzzel.snap_to_selected();
+                    st.upload_vertices();
+                    self.redraw = true;
+                }
+            }
+            return;
+        }
+
         let (select_next, select_prev) = *nav_keys();
         let logical_key = match event.keysym {
             xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
@@ -2383,7 +2411,11 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
             mode_specified = true;
             i += 1;
         } else if arg == "--switcher" {
-            needs_stdin = true;
+            // The compositor holds the pipe open to stream __cce_switcher_next__
+            // cycle lines after the item list, so there is no EOF to wait for —
+            // skip the blocking initial read and let the forwarding thread
+            // below stream everything (items included) to the daemon.
+            needs_stdin = false;
             mode_specified = true;
             i += 1;
         } else {
@@ -2647,6 +2679,7 @@ fn run_daemon(socket_path: &str) {
             items: initial_items,
             new_data: !initial_stdin.is_empty(),
             cycle_next: 0,
+            cycle_prev: 0,
             select_and_close: false,
             client_gone: false,
         }));
@@ -2665,6 +2698,9 @@ fn run_daemon(socket_path: &str) {
                 if let Ok(mut lock_state) = stdin_state_clone.lock() {
                     if trimmed == "__cce_switcher_next__" {
                         lock_state.cycle_next += 1;
+                        lock_state.new_data = true;
+                    } else if trimmed == "__cce_switcher_prev__" {
+                        lock_state.cycle_prev += 1;
                         lock_state.new_data = true;
                     } else if trimmed == "__cce_switcher_select_and_close__" {
                         lock_state.select_and_close = true;
@@ -2704,7 +2740,13 @@ fn run_daemon(socket_path: &str) {
                     if let (Ok(mut lock_daemon), Ok(mut lock_state)) = (stdin_state_for_handler.lock(), st.stdin_state.lock()) {
                         if lock_daemon.new_data {
                             lock_state.items = lock_daemon.items.clone();
-                            lock_state.cycle_next = lock_daemon.cycle_next;
+                            // Drain (not copy) the cycle counters: the daemon-side
+                            // counts are never consumed elsewhere, so leaving them
+                            // would re-apply every past cycle on each transfer.
+                            lock_state.cycle_next += lock_daemon.cycle_next;
+                            lock_daemon.cycle_next = 0;
+                            lock_state.cycle_prev += lock_daemon.cycle_prev;
+                            lock_daemon.cycle_prev = 0;
                             lock_state.select_and_close = lock_daemon.select_and_close;
                             lock_state.new_data = true;
                             lock_daemon.new_data = false;
