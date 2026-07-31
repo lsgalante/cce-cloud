@@ -1,0 +1,17 @@
+[Unit]
+Description=CCE Cloud Menu Daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/cce-cloud --daemon
+Restart=on-failure
+RestartSec=3
+Environment=RUST_LOG=info
+# App launches inherit this PATH; without %h/.local/bin, desktop entries
+# with bare Exec names fail to spawn.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+
+[Install]
+WantedBy=graphical-session.target
