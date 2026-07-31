@@ -8,6 +8,10 @@ Type=simple
 ExecStart=%h/.local/bin/cce-cloud --daemon
 Restart=on-failure
 RestartSec=3
+# The daemon spawns the user's app-menu launches as children; with the
+# default control-group kill mode a service restart silently kills every
+# app ever launched from the menu. Only signal the daemon itself.
+KillMode=process
 Environment=RUST_LOG=info
 # App launches inherit this PATH; without %h/.local/bin, desktop entries
 # with bare Exec names fail to spawn.

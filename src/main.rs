@@ -451,6 +451,12 @@ fn sort_apps_by_history(apps: &mut Vec<AppInfo>) {
 }
 
 fn spawn_command(cmd: &str) {
+    // Launched apps must outlive this daemon: process_group(0) moves them out
+    // of our process group so a terminal ^C (manual daemon run) doesn't kill
+    // them, and cce-cloud.service sets KillMode=process so a service restart
+    // doesn't cgroup-kill them either (systemd kills by cgroup, which no
+    // amount of setsid/double-fork escapes).
+    use std::os::unix::process::CommandExt;
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -462,6 +468,7 @@ fn spawn_command(cmd: &str) {
         std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
+            .process_group(0)
             .stdout(f.try_clone().unwrap())
             .stderr(f)
             .spawn()
@@ -470,6 +477,7 @@ fn spawn_command(cmd: &str) {
         std::process::Command::new("sh")
             .arg("-c")
             .arg(cmd)
+            .process_group(0)
             .spawn()
             .ok();
     }
