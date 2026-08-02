@@ -83,12 +83,16 @@ anchoring), `--align-right`, `--parent-app-id` (app_id becomes `cce-cloud:<paren
 Unlike most cce clients, this app does **not** implement the `Application` trait or use
 `cce_ui::engine::run`. It owns its event loop directly (smithay-client-toolkit handlers
 + calloop) and renders through **`cce_ui::vk::VkRenderer`** (the toolkit's raw-Vulkan
-backend): `upload_vertices` rebuilds `State::vertex_data`, `prepare_text` builds
-`TextSpan`s from the paint walk (buffers shaped at logical size, spans scaled to
-physical; fade alpha rides `default_color`), and `render` is
-`draw_frame(&vertex_data)`. `State::renderer` is an `Option` solely so `Drop` can tear
-the swapchain down before destroying the `wl_surface` (daemon mode churns one `State`
-per popup). It still reuses cce-ui pieces à la carte: `Vertex`/`quad_vertices`, the
+backend): `collect_display_list` builds a `PaintCtx` (beveled window plate, then the
+active widget's `paint_self` walk — bevel/recess prims included), `upload_vertices`
+runs it through `tessellate_display_list` into `State::vertex_data` + `frame_batches`
+(`Batch2D`, physical-px scissors) + `plate_features`, `prepare_text` builds `TextSpan`s
+from the paint walk (buffers shaped at logical size, spans scaled to physical; fade
+alpha rides `default_color`), and `render` is `draw_frame_2d(Frame2D { .. })`. During
+the close fade, shader-lit plate batches (recess rims) are dropped — their shading is
+not vertex-alpha and would linger at full strength. `State::renderer` is an `Option`
+solely so `Drop` can tear the swapchain down before destroying the `wl_surface` (daemon
+mode churns one `State` per popup). It still reuses cce-ui pieces à la carte: the
 narrow widget traits (`Layout`/`Paint`/`Input` via `Adapted<T>`), the scene paint walk
 (`append_widget_text`) for text extraction, `color`/`layout`/`scale` getters, and the
 `zcce_window_manager_v1` protocol. Follow existing cce-ui conventions when touching
