@@ -342,55 +342,6 @@ impl JsonLayoutWidget {
         (self.base.x, self.base.y, self.base.w, self.base.h)
     }
 
-    /// The page-filtered plain-quad aggregate (the old `WidgetHost::all_quads` override):
-    /// active-page children's backgrounds, decoration quads, and highlight, clipped to
-    /// the content area. External readers reach it through the adapter's reverse bridge
-    /// (`jl.all_quads(ctx)` serves `paint`'s plain prims, which come from here).
-    fn aggregate_quads(&self, ctx: &UiContext) -> Vec<(f32, f32, f32, f32, [f32; 4])> {
-        let mut quads = Vec::new();
-
-        let active_page = self.active_page;
-        let (bx, by, bw, bh) = self.rect();
-        let pad_x = 16.0;
-        let min_x = bx + pad_x - 4.0;
-        let max_x = bx + bw;
-        let min_y = by;
-        let max_y = by + bh;
-
-        let push_clipped = |qx: f32, qy: f32, qw: f32, qh: f32, qc: [f32; 4], q: &mut Vec<(f32, f32, f32, f32, [f32; 4])>| {
-            let rx1 = qx.max(min_x);
-            let ry1 = qy.max(min_y);
-            let rx2 = (qx + qw).min(max_x);
-            let ry2 = (qy + qh).min(max_y);
-            let rw = rx2 - rx1;
-            let rh = ry2 - ry1;
-            if rw > 0.0 && rh > 0.0 {
-                q.push((rx1, ry1, rw, rh, qc));
-            }
-        };
-
-        for w in &self.widgets {
-            if w.page_idx != active_page {
-                continue;
-            }
-            let (wx, wy, ww, wh) = w.widget.as_dyn().rect();
-            let has_rounded = w.widget.as_dyn().corner_style().1 != (false, false, false, false);
-            if !has_rounded {
-                push_clipped(wx, wy, ww, wh, w.widget.as_dyn().color(), &mut quads);
-            }
-            for q in w.widget.as_dyn().all_quads(ctx) {
-                if has_rounded && (q.0 - wx).abs() < 0.1 && (q.1 - wy).abs() < 0.1 && (q.2 - ww).abs() < 0.1 && (q.3 - wh).abs() < 0.1 {
-                    continue;
-                }
-                push_clipped(q.0, q.1, q.2, q.3, q.4, &mut quads);
-            }
-            if let Some(hq) = w.widget.as_dyn().highlight_quad(ctx) {
-                push_clipped(hq.0, hq.1, hq.2, hq.3, hq.4, &mut quads);
-            }
-        }
-        quads
-    }
-
     /// Per-frame child state (the old `WidgetHost::tick` override): active-page widgets only.
     fn tick_children(&mut self, dt: f32, ctx: &mut UiContext) -> bool {
         let mut changed = false;
@@ -611,19 +562,65 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
 
     fn paint(&self, _rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
         use cce_ui::scene::layout::Rect;
+        use cce_ui::scene::paint::{PaintCtx, Prim};
         // The children are Phase 5 Adapted leaves: nothing their all_* getters or the
         // label walk reads comes from the routing context, so a fresh one stands in for
         // the ctx `Paint::paint` does not carry.
         let dummy = UiContext::new();
-        // Rounded: the deleted WidgetHost default's shape — no own background (transparent,
-        // sharp corners), every child unfiltered, in `widgets` order.
+        // Children through the real paint walk, geometry only: bevel/recess/plate prims
+        // survive to the tessellator where the old quad bridges flattened them to fills.
+        // Text prims are skipped — every label, container-owned and child-owned alike,
+        // is served by `own_labels_with_bounds` below, and emitting the children's own
+        // labels here as well would double them. Page filtering and the panel clip
+        // mirror the dissolved `aggregate_quads` bounds.
+        let (bx, by, bw, bh) = self.rect();
+        let pad_x = 16.0;
+        let clip = Rect { x: bx + pad_x - 4.0, y: by, width: bw - (pad_x - 4.0), height: bh };
         for w in &self.widgets {
-            for (x, y, qw, qh, r, c, corners) in w.widget.as_dyn().all_rounded_quads(&dummy) {
-                pc.rounded_rect(Rect { x, y, width: qw, height: qh }, r, corners, c);
+            if w.page_idx != self.active_page {
+                continue;
             }
-        }
-        for (x, y, w, h, c) in self.aggregate_quads(&dummy) {
-            pc.quad(Rect { x, y, width: w, height: h }, c);
+            let mut tmp = PaintCtx::new();
+            w.widget.as_dyn().paint_self(&dummy, &mut tmp);
+            pc.clip(clip, |pc| {
+                for item in tmp.finish().items {
+                    let clip_circle = item.clip_circle;
+                    if let Some(c) = clip_circle {
+                        pc.push_clip_circle(c);
+                    }
+                    match item.prim {
+                        Prim::Text { .. } => {}
+                        Prim::Quad { rect, color } => pc.quad(rect, color),
+                        Prim::RoundedRect { rect, radius, corners, color } => pc.rounded_rect(rect, radius, corners, color),
+                        Prim::Border { rect, radii, fill, border, thickness } => pc.border(rect, radii, fill, border, thickness),
+                        Prim::Bevel { rect, radii, color, depth, tint } => pc.bevel_tinted(rect, radii, color, depth, tint),
+                        Prim::Recess { rect, radii, depth, edges, tint } => match tint {
+                            Some(t) => pc.recess_tinted(rect, radii, depth, t),
+                            None => pc.recess_edges(rect, radii, depth, edges),
+                        },
+                        Prim::Boss { rect, radii, depth, edges, tint } => match tint {
+                            Some(t) => pc.boss_edges_tinted(rect, radii, depth, edges, t),
+                            None => pc.boss_edges(rect, radii, depth, edges),
+                        },
+                        Prim::Ridge { rect, radii, depth, edges } => pc.ridge_edges(rect, radii, depth, edges),
+                        Prim::Plate { rect, radii, color, depth } => pc.plate(rect, radii, color, depth),
+                        Prim::Arc { cx, cy, radius, thickness, start, end, color } => pc.arc(cx, cy, radius, thickness, start, end, color),
+                        Prim::ArcShaded { cx, cy, radius, thickness, start, end, inner, crest, outer } => {
+                            pc.arc_shaded(cx, cy, radius, thickness, start, end, inner, crest, outer)
+                        }
+                        Prim::Vector { x1, y1, x2, y2, thickness, color, cap } => pc.vector(x1, y1, x2, y2, thickness, color, cap),
+                        Prim::Circle { cx, cy, radius, color } => pc.circle(cx, cy, radius, color),
+                        Prim::Sphere { cx, cy, radius, color } => pc.sphere(cx, cy, radius, color),
+                        Prim::ConcaveFillet { cx, cy, radius, depth, start, raised } => {
+                            pc.concave_fillet(cx, cy, radius, depth, start, raised)
+                        }
+                        Prim::Image { image, rect, alpha } => pc.image(image, rect, alpha),
+                    }
+                    if clip_circle.is_some() {
+                        pc.pop_clip_circle();
+                    }
+                }
+            });
         }
         for (tl, bounds) in self.own_labels_with_bounds(&dummy) {
             pc.text_with(tl.text, tl.x, tl.y, tl.font_size, tl.color, None, bounds);
