@@ -44,98 +44,44 @@ use calloop_wayland_source::WaylandSource;
 
 use glyphon::{Attrs, Buffer, FontSystem, Metrics, SwashCache};
 
-use cce_ui::vk::{TextSpan, VkRenderer};
+use cce_ui::vk::{Batch2D, Frame2D, TextSpan, VkRenderer};
 
-// Vertex and quad_vertices are shared from the cce-ui engine.
-pub(crate) use cce_ui::engine::{quad_vertices, Vertex};
+// Vertex is shared from the cce-ui engine.
+pub(crate) use cce_ui::engine::Vertex;
 
-fn rounded_rect_vertices_corners(
-    x: f32, y: f32, ww: f32, h: f32,
-    r: f32,
+/// Tessellate a display list into the flat vertex buffer plus the renderer
+/// batches, converting the tessellator's logical-px `DlBatch` clips to
+/// `Batch2D`'s physical px (the same mapping the engine runner applies). Going
+/// through the display list — instead of the old `extra_quads` flattening —
+/// is what lets bevel/recess prims survive to the tessellator.
+fn tessellate(
+    dl: &cce_ui::scene::paint::DisplayList,
     sw: f32, sh: f32,
-    color: [f32; 4],
-    corners: (bool, bool, bool, bool),
-) -> Vec<Vertex> {
-    let mut verts = Vec::new();
-    let r = r.min(ww * 0.5).min(h * 0.5);
-
-    let push_quad = |verts: &mut Vec<Vertex>, qx: f32, qy: f32, qw: f32, qh: f32| {
-        let x0 = qx;
-        let y0 = qy;
-        let x1 = qx + qw;
-        let y1 = qy + qh;
-        
-        let ndc_x0 = (x0 / sw) * 2.0 - 1.0;
-        let ndc_y0 = 1.0 - (y0 / sh) * 2.0;
-        let ndc_x1 = (x1 / sw) * 2.0 - 1.0;
-        let ndc_y1 = 1.0 - (y1 / sh) * 2.0;
-        
-        let clip_circle = [0.0, 0.0, 0.0];
-        verts.push(Vertex { position: [ndc_x0, ndc_y0], color, clip_circle });
-        verts.push(Vertex { position: [ndc_x1, ndc_y0], color, clip_circle });
-        verts.push(Vertex { position: [ndc_x0, ndc_y1], color, clip_circle });
-        verts.push(Vertex { position: [ndc_x1, ndc_y0], color, clip_circle });
-        verts.push(Vertex { position: [ndc_x1, ndc_y1], color, clip_circle });
-        verts.push(Vertex { position: [ndc_x0, ndc_y1], color, clip_circle });
-    };
-
-    if r <= 0.1 || (!corners.0 && !corners.1 && !corners.2 && !corners.3) {
-        push_quad(&mut verts, x, y, ww, h);
-        return verts;
-    }
-
-    push_quad(&mut verts, x + r, y, ww - 2.0 * r, h);
-    push_quad(&mut verts, x, y + r, r, h - 2.0 * r);
-    push_quad(&mut verts, x + ww - r, y + r, r, h - 2.0 * r);
-
-    let corner_configs = [
-        (corners.0, x, y, x + r, y + r, std::f32::consts::PI, 1.5 * std::f32::consts::PI),
-        (corners.1, x + ww - r, y, x + ww - r, y + r, 1.5 * std::f32::consts::PI, 2.0 * std::f32::consts::PI),
-        (corners.2, x + ww - r, y + h - r, x + ww - r, y + h - r, 0.0, 0.5 * std::f32::consts::PI),
-        (corners.3, x, y + h - r, x + r, y + h - r, 0.5 * std::f32::consts::PI, std::f32::consts::PI),
-    ];
-
-    let segments = 16;
-    for &(is_rounded, sqx, sqy, cx, cy, start, end) in &corner_configs {
-        if is_rounded {
-            for i in 0..segments {
-                let theta1 = start + (i as f32) * (end - start) / (segments as f32);
-                let theta2 = start + ((i + 1) as f32) * (end - start) / (segments as f32);
-                
-                let x0 = cx;
-                let y0 = cy;
-                let x1 = cx + r * theta1.cos();
-                let y1 = cy + r * theta1.sin();
-                let x2 = cx + r * theta2.cos();
-                let y2 = cy + r * theta2.sin();
-                
-                let ndc_x0 = (x0 / sw) * 2.0 - 1.0;
-                let ndc_y0 = 1.0 - (y0 / sh) * 2.0;
-                let ndc_x1 = (x1 / sw) * 2.0 - 1.0;
-                let ndc_y1 = 1.0 - (y1 / sh) * 2.0;
-                let ndc_x2 = (x2 / sw) * 2.0 - 1.0;
-                let ndc_y2 = 1.0 - (y2 / sh) * 2.0;
-                
-                let clip_circle = [0.0, 0.0, 0.0];
-                verts.push(Vertex { position: [ndc_x0, ndc_y0], color, clip_circle });
-                verts.push(Vertex { position: [ndc_x1, ndc_y1], color, clip_circle });
-                verts.push(Vertex { position: [ndc_x2, ndc_y2], color, clip_circle });
-            }
-        } else {
-            push_quad(&mut verts, sqx, sqy, r, r);
-        }
-    }
-
-    verts
-}
-
-fn widget_vertices(w: &dyn WidgetHost, sw: f32, sh: f32) -> Vec<Vertex> {
-    let (x, y, ww, h) = w.rect();
-    let mut verts = quad_vertices(x, y, ww, h, sw, sh, w.color()).to_vec();
-    for (qx, qy, qw, qh, qc) in w.extra_quads() {
-        verts.extend(quad_vertices(qx, qy, qw, qh, sw, sh, qc));
-    }
-    verts
+    scale: f32,
+) -> (Vec<Vertex>, Vec<Batch2D>, Vec<[f32; 12]>) {
+    let (verts, dl_batches, _images, features) =
+        cce_ui::backend::window_runner::tessellate_display_list(dl, sw, sh, scale);
+    let batches = dl_batches
+        .iter()
+        .map(|b| Batch2D {
+            scissor: b.scissor.map(|c| {
+                (
+                    (c.x * scale).max(0.0) as u32,
+                    (c.y * scale).max(0.0) as u32,
+                    (c.width * scale) as u32,
+                    (c.height * scale) as u32,
+                )
+            }),
+            clip_rrect: b.clip_rrect.map(|c| {
+                [c[0] * scale, c[1] * scale, c[2] * scale, c[3] * scale, c[4] * scale]
+            }),
+            start: b.start,
+            end: b.end,
+            plate: b.plate,
+            blur_behind: b.blur_behind,
+        })
+        .collect();
+    (verts, batches, features)
 }
 
 fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buffer {
@@ -590,22 +536,15 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         let pad = 15.0;
         let search_h = 35.0;
 
-        // Search Bar Background
-        ctx.quad(
-            Rect { x: self.x + pad, y: self.y + pad, width: self.w - pad * 2.0, height: search_h },
-            [0.10, 0.10, 0.14, 1.0],
-        );
-
-        // Search Bar Border
-        let border_color = [0.25, 0.45, 0.85, 1.0];
-        let bx = self.x + pad;
-        let by = self.y + pad;
-        let bw = self.w - pad * 2.0;
-        let bh = search_h;
-        ctx.quad(Rect { x: bx, y: by, width: bw, height: 1.0 }, border_color);
-        ctx.quad(Rect { x: bx, y: by + bh - 1.0, width: bw, height: 1.0 }, border_color);
-        ctx.quad(Rect { x: bx, y: by, width: 1.0, height: bh }, border_color);
-        ctx.quad(Rect { x: bx + bw - 1.0, y: by, width: 1.0, height: bh }, border_color);
+        // Search bar — a well recessed into the plate, its rim lit in the
+        // highlight accent (the toolkit's focused-well treatment; the query
+        // line always holds keyboard focus here). Replaces the flat fill +
+        // 1px border quads.
+        let well = Rect { x: self.x + pad, y: self.y + pad, width: self.w - pad * 2.0, height: search_h };
+        ctx.quad(well, [0.10, 0.10, 0.14, 1.0]);
+        let depth = cce_ui::layout::bevel_width().min(search_h * 0.2);
+        let hc = cce_ui::color::highlight_primary_color();
+        ctx.recess_tinted(well, (0.0, 0.0, 0.0, 0.0), depth, [hc[0], hc[1], hc[2]]);
 
         // ScrollBox quads
         let mut quads = Vec::new();
@@ -620,15 +559,16 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             let virtual_selected_y = self.selected as f32 * item_h;
             if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
                 let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
-                ctx.quad(
-                    Rect {
-                        x: self.x + pad + 2.0,
-                        y: draw_y,
-                        width: self.w - pad * 2.0 - 4.0 - scrollbar_w,
-                        height: item_h - 2.0,
-                    },
-                    [0.20, 0.35, 0.65, 0.9],
-                );
+                // A raised beveled chip, not a flat tint: the selection reads
+                // as sitting proud of the list the way focused panes do.
+                let sel = Rect {
+                    x: self.x + pad + 2.0,
+                    y: draw_y,
+                    width: self.w - pad * 2.0 - 4.0 - scrollbar_w,
+                    height: item_h - 2.0,
+                };
+                let depth = cce_ui::color::plate_bevel_width().min(sel.height * 0.2);
+                ctx.bevel(sel, (4.0, 4.0, 4.0, 4.0), [0.20, 0.35, 0.65, 0.9], depth);
             }
         }
 
@@ -707,6 +647,8 @@ struct State {
     // (the swapchain must not outlive its Wayland surface).
     renderer: Option<VkRenderer>,
     vertex_data: Vec<Vertex>,
+    frame_batches: Vec<Batch2D>,
+    plate_features: Vec<[f32; 12]>,
 
     fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
     json_layout: Option<cce_ui::widget::Adapted<JsonLayoutWidget>>,
@@ -1011,6 +953,8 @@ impl State {
             wl_surface,
             renderer: Some(renderer),
             vertex_data: Vec::new(),
+            frame_batches: Vec::new(),
+            plate_features: Vec::new(),
             fuzzel,
             json_layout,
             font_system,
@@ -1208,51 +1152,59 @@ impl State {
         }
     }
 
-    fn collect_vertices(&self) -> Vec<Vertex> {
-        let sw = self.width;
-        let sh = self.height;
-        let mut verts = Vec::new();
+    fn collect_display_list(&self) -> cce_ui::scene::paint::DisplayList {
+        use cce_ui::scene::layout::Rect;
+        let mut pc = cce_ui::scene::paint::PaintCtx::new();
 
-        // 1. Window background — the dissolved Backplate's exact emission: base color at
-        // the configured backplate opacity, all corners rounded when the radius is set.
+        // 1. Window background — the dissolved Backplate's emission (base color at
+        // the configured backplate opacity), now as a beveled plate: the rolled
+        // rim makes the popup read as a raised surface instead of a flat sheet.
         let mut bg_color = self.window_bg;
         if bg_color[3] > 0.001 {
             bg_color[3] = cce_ui::color::active_backplate_opacity();
         }
         if bg_color[3] > 0.0 {
-            let r = self.window_radius;
-            let corners = if r > 0.1 { (true, true, true, true) } else { (false, false, false, false) };
+            let r = if self.window_radius > 0.1 { self.window_radius } else { 0.0 };
             let (wx, wy, ww, wh) = self.window_rect;
-            verts.extend(rounded_rect_vertices_corners(wx, wy, ww, wh, r, sw, sh, bg_color, corners));
+            pc.bevel(
+                Rect { x: wx, y: wy, width: ww, height: wh },
+                (r, r, r, r),
+                bg_color,
+                cce_ui::color::plate_bevel_width(),
+            );
         }
 
-        // 3. Draw child widgets
+        // 2. Child widgets, through the paint walk: bevel/recess prims reach the
+        // tessellator instead of being flattened away by the legacy quad bridges.
         if self.mode == LauncherMode::Json {
             if let Some(jl) = &self.json_layout {
-                for (qx, qy, qw, qh, qc) in jl.all_quads(&self.ui_context) {
-                    verts.extend(quad_vertices(qx, qy, qw, qh, sw, sh, qc));
-                }
-                for (qx, qy, qw, qh, qr, qc, qcorners) in jl.all_rounded_quads(&self.ui_context) {
-                    verts.extend(rounded_rect_vertices_corners(qx, qy, qw, qh, qr, sw, sh, qc, qcorners));
-                }
+                jl.paint_self(&self.ui_context, &mut pc);
             }
         } else {
-            verts.extend(widget_vertices(&self.fuzzel, sw, sh));
+            self.fuzzel.paint_self(&self.ui_context, &mut pc);
         }
 
-        verts
+        pc.finish()
     }
 
     fn upload_vertices(&mut self) {
-        let mut verts = self.collect_vertices();
+        let dl = self.collect_display_list();
+        let (mut verts, mut batches, features) =
+            tessellate(&dl, self.width, self.height, self.scale as f32);
         if self.fade_factor < 1.0 {
             for v in &mut verts {
                 v.color[3] *= self.fade_factor;
             }
+            // SDF-plate overlays (the recess rims) are shader-lit, not
+            // vertex-alpha — drop them during the close fade rather than let
+            // their shading linger at full strength over fading geometry.
+            batches.retain(|b| b.plate.is_none());
         }
-        // The GPU upload happens in VkRenderer::draw_frame, which consumes
+        // The GPU upload happens in VkRenderer::draw_frame_2d, which consumes
         // vertex_data every frame.
         self.vertex_data = verts;
+        self.frame_batches = batches;
+        self.plate_features = features;
     }
 
     fn prepare_text(&mut self) {
@@ -1321,7 +1273,14 @@ impl State {
         self.fade_factor = fade_factor;
         self.upload_vertices();
         self.prepare_text();
-        self.renderer.as_mut().unwrap().draw_frame(&self.vertex_data);
+        self.renderer.as_mut().unwrap().draw_frame_2d(Frame2D {
+            verts: &self.vertex_data,
+            batches: &self.frame_batches,
+            overlay_verts: &[],
+            images: &[],
+            plate_features: &self.plate_features,
+            clear_color: [0.0; 4],
+        });
         false
     }
 }
