@@ -972,7 +972,17 @@ impl State {
 
             fade_factor: 1.0,
             max_width: width,
-            max_height: height,
+            // For json mode the initial `height` is a crude pre-layout estimate
+            // (it ignores per-widget label offsets), so it must not double as the
+            // growth cap — the accurately measured page height would be clipped
+            // against it. Cap at the caller's explicit height when given, else a
+            // sane maximum; update_desired_size resizes to the measured content
+            // within that.
+            max_height: if mode == LauncherMode::Json {
+                json_layout_config.as_ref().and_then(|c| c.height).unwrap_or(600)
+            } else {
+                height
+            },
             select_item,
             switcher_mode,
             last_tick: std::time::Instant::now(),
@@ -1808,6 +1818,14 @@ impl WindowHandler for AppState {
                 let pw = (width as f64 * state.scale) as u32;
                 let ph = (height as f64 * state.scale) as u32;
                 state.resize(pw, ph);
+                // Re-assert the content-derived size. The compositor's overlay
+                // fresh-slot configure arrives full-height (cce-cloud app_ids are
+                // mode-forced to Overlay); obeying it verbatim left --json popups
+                // as a monitor-tall strip. Dmenu mode always recovered because
+                // every stdin batch re-runs this — json got sized exactly once,
+                // before the configure. The commit below updates box_geom, which
+                // the compositor's stored-geometry path then respects.
+                state.update_desired_size();
             }
         }
         self.redraw = true;
