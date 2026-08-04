@@ -3157,6 +3157,85 @@ mod tests {
         assert!(layout.widgets[2].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Button>().unwrap().hovered());
     }
 
+    /// Hover must be exclusive: a pointer over one button leaves the others
+    /// unhovered (the desktop context menu regression — every button lit up
+    /// once the paint walk started rendering the Button model's hover state).
+    #[test]
+    fn test_json_button_hover_is_exclusive() {
+        let mk_btn = |id: &str, text: &str| JsonWidgetConfig {
+            widget_type: "button".to_string(),
+            text: text.to_string(),
+            id: Some(id.to_string()),
+            checked: None,
+            value: None,
+            min: None,
+            max: None,
+            step: None,
+            decimals: None,
+            color: None,
+            value_f32: None,
+            min_f32: None,
+            max_f32: None,
+            target_page: None,
+        };
+        let config = JsonLayoutConfig {
+            width: Some(300),
+            height: Some(400),
+            widgets: Some(vec![mk_btn("a", "Alpha"), mk_btn("b", "Beta"), mk_btn("c", "Gamma")]),
+            pages: None,
+            justify: None,
+        };
+        let mut layout = JsonLayoutWidget::new(&config);
+        layout.set_rect(0.0, 0.0, 300.0, 400.0);
+        let mut ctx = cce_ui::context::UiContext::new();
+
+        let hovered = |layout: &cce_ui::widget::Adapted<JsonLayoutWidget>, i: usize| {
+            layout.widgets[i]
+                .widget
+                .as_dyn()
+                .as_any()
+                .downcast_ref::<cce_ui::widget::Button>()
+                .unwrap()
+                .hovered()
+        };
+
+        // Pointer over the first button only.
+        let (x0, y0) = (layout.widgets[0].x, layout.widgets[0].y);
+        layout.on_cursor_moved(x0 + 10.0, y0 + 5.0, &mut ctx);
+        assert!(hovered(&layout, 0), "hovered button must be hovered");
+        assert!(!hovered(&layout, 1), "second button must not be hovered");
+        assert!(!hovered(&layout, 2), "third button must not be hovered");
+
+        // Move to the third button: hover follows, first clears.
+        let (x2, y2) = (layout.widgets[2].x, layout.widgets[2].y);
+        layout.on_cursor_moved(x2 + 10.0, y2 + 5.0, &mut ctx);
+        assert!(!hovered(&layout, 0), "old hover must clear");
+        assert!(!hovered(&layout, 1));
+        assert!(hovered(&layout, 2), "new hover must set");
+
+        // Pointer inside the panel but on no button: everything clears.
+        layout.on_cursor_moved(150.0, 395.0, &mut ctx);
+        assert!(!hovered(&layout, 0));
+        assert!(!hovered(&layout, 1));
+        assert!(!hovered(&layout, 2));
+
+        // The live path: routed dispatch through the UiContext, and crucially a
+        // SECOND move that changes no child hover. The first (consumed) move
+        // skips the adapter's base-hover bookkeeping; the unconsumed second one
+        // runs it, synthesizing a MouseEnter for the panel — which route_event
+        // must NOT broadcast to the children (the desktop-menu regression: every
+        // button lit up on the first stationary wiggle).
+        let (x1, y1) = (layout.widgets[1].x, layout.widgets[1].y);
+        let root = layout.id();
+        ctx.register_widget(root, layout.as_ptr_mut());
+        let mv = |x: f32, y: f32| cce_ui::widget::Event::PointerMove { x, y, local_x: x, local_y: y };
+        ctx.propagate_event(&mv(x1 + 10.0, y1 + 5.0), root);
+        ctx.propagate_event(&mv(x1 + 12.0, y1 + 5.0), root);
+        assert!(!hovered(&layout, 0), "unconsumed move must not hover-broadcast");
+        assert!(hovered(&layout, 1));
+        assert!(!hovered(&layout, 2), "unconsumed move must not hover-broadcast");
+    }
+
     #[test]
     fn test_app_history_sorting() {
         let temp_dir = std::path::PathBuf::from("/tmp/cce-cloud-test-cache-dir");

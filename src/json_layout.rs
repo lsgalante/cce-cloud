@@ -362,6 +362,17 @@ impl JsonLayoutWidget {
     /// ungated legacy direct-dispatch path — the trailing focus-clear on a missed press
     /// depends on that.
     fn route_event(&mut self, event: &Event, ctx: &mut UiContext) -> bool {
+        // MouseEnter targets THIS container (the adapter's base-hover bookkeeping
+        // synthesizes it when a move goes unconsumed). Broadcasting it to every
+        // child marks them all hovered — Button's on_event trusts the router
+        // contract that Enter only reaches the widget under the cursor (the
+        // desktop-menu every-button-lit bug). The next PointerMove re-derives
+        // child hover, so dropping it loses nothing. MouseLeave still broadcasts
+        // below: clearing every child's hover is exactly what leaving the panel
+        // means.
+        if matches!(event, Event::MouseEnter) {
+            return false;
+        }
         let mut changed = false;
 
         match event {
