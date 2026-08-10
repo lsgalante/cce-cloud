@@ -306,6 +306,7 @@ mod tests {
             repeat: false,
             ctrl: false,
             shift: false,
+            alt: false,
         };
         assert!(!r.keyboard(&down)); // neither hovered nor focused
         r.cursor_moved(50.0, 50.0);

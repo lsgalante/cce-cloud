@@ -2061,6 +2061,7 @@ impl AppState {
                     repeat: false,
                     ctrl: self.ctrl_pressed,
                     shift: false,
+                    alt: false,
                 };
                 if let Some(jl) = &mut st.json_layout {
                     let kev = cce_ui::widget::Event::KeyInput(key_event.clone());
