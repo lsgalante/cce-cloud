@@ -280,6 +280,13 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
                             terminal = true;
                         }
                     }
+                    // Hidden means "treat as deleted" — same outcome as
+                    // NoDisplay for a launcher: the entry never shows.
+                    "Hidden" => {
+                        if value == "true" {
+                            no_display = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -296,31 +303,55 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
 
 fn scan_apps() -> Vec<AppInfo> {
     let mut apps = Vec::new();
-    // XDG precedence: user entries override system ones. The stable sort +
-    // dedup below keeps the first-pushed entry per name, so scan
-    // highest-priority dirs first.
+    // XDG precedence: $XDG_DATA_HOME first, then each $XDG_DATA_DIRS entry in
+    // order (defaults per the base-directory spec). Honoring XDG_DATA_DIRS is
+    // what makes Flatpak/Snap exports visible.
     let mut dirs = Vec::new();
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(std::path::PathBuf::from(home).join(".local/share/applications"));
+    let data_home = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        });
+    if let Some(data_home) = data_home {
+        dirs.push(data_home.join("applications"));
     }
-    dirs.push(std::path::PathBuf::from("/usr/local/share/applications"));
-    dirs.push(std::path::PathBuf::from("/usr/share/applications"));
+    let data_dirs = std::env::var("XDG_DATA_DIRS")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
+    for dir in std::env::split_paths(&data_dirs) {
+        if !dir.as_os_str().is_empty() {
+            dirs.push(dir.join("applications"));
+        }
+    }
 
+    // The first file claiming a desktop-file ID (the file stem) shadows that
+    // ID in every later dir — even when the winning entry is itself
+    // Hidden/NoDisplay, which is how a user entry deletes a system one.
+    let mut seen_ids = std::collections::HashSet::new();
     for dir in dirs {
         if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().map_or(false, |ext| ext == "desktop") {
-                        if let Some(app) = parse_desktop_file(&path) {
-                            apps.push(app);
-                        }
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().map_or(false, |ext| ext == "desktop") {
+                    let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if !seen_ids.insert(id.to_string()) {
+                        continue;
+                    }
+                    if let Some(app) = parse_desktop_file(&path) {
+                        apps.push(app);
                     }
                 }
             }
         }
     }
-    
+
     // Terminal=true apps need an emulator to host them; with none installed,
     // spawning them bare would fail silently, so drop the entries instead.
     if terminal_emulator().is_none() {
@@ -3297,6 +3328,61 @@ mod tests {
         assert!(!app.terminal);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_apps_xdg_precedence() {
+        let base = std::path::PathBuf::from("/tmp/cce-cloud-test-xdg");
+        let _ = std::fs::remove_dir_all(&base);
+        let user = base.join("home/applications");
+        let sys = base.join("sys/applications");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+
+        std::fs::write(
+            sys.join("editor.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Editor\nExec=editor-sys\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sys.join("player.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Player\nExec=player\n",
+        )
+        .unwrap();
+        // User dir: renames editor (same ID must still shadow the system
+        // entry) and deletes player via Hidden.
+        std::fs::write(
+            user.join("editor.desktop"),
+            "[Desktop Entry]\nType=Application\nName=My Editor\nExec=editor-user\n",
+        )
+        .unwrap();
+        std::fs::write(
+            user.join("player.desktop"),
+            "[Desktop Entry]\nType=Application\nName=Player\nExec=player\nHidden=true\n",
+        )
+        .unwrap();
+
+        let orig_home = std::env::var("XDG_DATA_HOME").ok();
+        let orig_dirs = std::env::var("XDG_DATA_DIRS").ok();
+        std::env::set_var("XDG_DATA_HOME", base.join("home"));
+        std::env::set_var("XDG_DATA_DIRS", base.join("sys"));
+
+        let apps = scan_apps();
+
+        match orig_home {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match orig_dirs {
+            Some(v) => std::env::set_var("XDG_DATA_DIRS", v),
+            None => std::env::remove_var("XDG_DATA_DIRS"),
+        }
+
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].name, "My Editor");
+        assert_eq!(apps[0].exec, "editor-user");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
