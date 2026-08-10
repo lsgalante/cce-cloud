@@ -234,6 +234,7 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
     let mut exec = None;
     let mut is_application = true;
     let mut no_display = false;
+    let mut terminal = false;
 
     for line in reader.lines() {
         let line = line.ok()?;
@@ -274,6 +275,11 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
                             no_display = true;
                         }
                     }
+                    "Terminal" => {
+                        if value == "true" {
+                            terminal = true;
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -282,7 +288,7 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
 
     if is_application && !no_display {
         if let (Some(n), Some(e)) = (name, exec) {
-            return Some(AppInfo { name: n, exec: e });
+            return Some(AppInfo { name: n, exec: e, terminal });
         }
     }
     None
@@ -315,6 +321,12 @@ fn scan_apps() -> Vec<AppInfo> {
         }
     }
     
+    // Terminal=true apps need an emulator to host them; with none installed,
+    // spawning them bare would fail silently, so drop the entries instead.
+    if terminal_emulator().is_none() {
+        apps.retain(|app| !app.terminal);
+    }
+
     apps.sort_by(|a, b| a.name.cmp(&b.name));
     apps.dedup_by(|a, b| a.name == b.name);
     apps
@@ -397,12 +409,49 @@ fn sort_apps_by_history(apps: &mut Vec<AppInfo>) {
 }
 
 fn spawn_command(cmd: &str) {
+    spawn_detached("sh", &["-c", cmd]);
+}
+
+/// Launch an app entry; `Terminal=true` entries are hosted in a terminal
+/// emulator (entries are dropped at scan time when none is installed).
+fn spawn_app(app: &AppInfo) {
+    if app.terminal {
+        if let Some(term) = terminal_emulator() {
+            spawn_detached(&term, &["sh", "-c", &format!("exec {}", app.exec)]);
+            return;
+        }
+    }
+    spawn_command(&app.exec);
+}
+
+/// Terminal used to host `Terminal=true` desktop entries: $TERMINAL if it
+/// resolves on PATH, else foot. Callers pass the command positionally
+/// (`term sh -c …`), not via `-e`, which foot does not accept.
+fn terminal_emulator() -> Option<String> {
+    std::env::var("TERMINAL")
+        .ok()
+        .filter(|t| !t.is_empty() && command_in_path(t))
+        .or_else(|| command_in_path("foot").then(|| "foot".to_string()))
+}
+
+fn command_in_path(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return std::path::Path::new(cmd).is_file();
+    }
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| dir.join(cmd).is_file())
+    })
+}
+
+fn spawn_detached(program: &str, args: &[&str]) {
     // Launched apps must outlive this daemon: process_group(0) moves them out
     // of our process group so a terminal ^C (manual daemon run) doesn't kill
     // them, and cce-cloud.service sets KillMode=process so a service restart
     // doesn't cgroup-kill them either (systemd kills by cgroup, which no
     // amount of setsid/double-fork escapes).
     use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args).process_group(0);
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -410,23 +459,10 @@ fn spawn_command(cmd: &str) {
     {
         let mut f = file;
         use std::io::Write;
-        let _ = writeln!(f, "[spawn] executing: {}", cmd);
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .process_group(0)
-            .stdout(f.try_clone().unwrap())
-            .stderr(f)
-            .spawn()
-            .ok();
-    } else {
-        std::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .process_group(0)
-            .spawn()
-            .ok();
+        let _ = writeln!(f, "[spawn] executing: {} {}", program, args.join(" "));
+        cmd.stdout(f.try_clone().unwrap()).stderr(f);
     }
+    cmd.spawn().ok();
 }
 
 
@@ -617,6 +653,7 @@ enum LauncherMode {
 struct AppInfo {
     name: String,
     exec: String,
+    terminal: bool,
 }
 
 struct StdinState {
@@ -1354,7 +1391,7 @@ impl AppState {
                         LauncherMode::Apps => {
                             if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
                                 record_app_launch(&app.name);
-                                spawn_command(&app.exec);
+                                spawn_app(app);
                             }
                         }
                         LauncherMode::Path => {
@@ -1600,7 +1637,7 @@ impl PointerHandler for AppState {
                                                 LauncherMode::Apps => {
                                                     if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
                                                         record_app_launch(&app.name);
-                                                        spawn_command(&app.exec);
+                                                        spawn_app(app);
                                                     }
                                                 }
                                                 LauncherMode::Path => {
@@ -3237,6 +3274,32 @@ mod tests {
     }
 
     #[test]
+    fn parse_desktop_terminal_flag() {
+        let dir = std::path::PathBuf::from("/tmp/cce-cloud-test-desktop-dir");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let path = dir.join("htop.desktop");
+        std::fs::write(
+            &path,
+            "[Desktop Entry]\nType=Application\nName=htop\nExec=htop\nTerminal=true\n",
+        )
+        .unwrap();
+        let app = parse_desktop_file(&path).unwrap();
+        assert!(app.terminal);
+
+        let path = dir.join("gui.desktop");
+        std::fs::write(
+            &path,
+            "[Desktop Entry]\nType=Application\nName=Gui\nExec=gui %U\n",
+        )
+        .unwrap();
+        let app = parse_desktop_file(&path).unwrap();
+        assert!(!app.terminal);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_app_history_sorting() {
         let temp_dir = std::path::PathBuf::from("/tmp/cce-cloud-test-cache-dir");
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -3246,9 +3309,9 @@ mod tests {
         std::env::set_var("XDG_CACHE_HOME", &temp_dir);
 
         let mut apps = vec![
-            AppInfo { name: "App A".to_string(), exec: "exec_a".to_string() },
-            AppInfo { name: "App B".to_string(), exec: "exec_b".to_string() },
-            AppInfo { name: "App C".to_string(), exec: "exec_c".to_string() },
+            AppInfo { name: "App A".to_string(), exec: "exec_a".to_string(), terminal: false },
+            AppInfo { name: "App B".to_string(), exec: "exec_b".to_string(), terminal: false },
+            AppInfo { name: "App C".to_string(), exec: "exec_c".to_string(), terminal: false },
         ];
 
         // Initially no history, sorted alphabetically.
