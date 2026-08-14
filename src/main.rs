@@ -1710,7 +1710,15 @@ impl PointerHandler for AppState {
             }
             if let Some(st) = &mut self.state {
                 log::debug!("Event: position={:?}, scale={}, kind={:?}", event.position, st.scale, event.kind);
-                let (cx, cy) = cce_ui::wayland::scale_pointer_pos(event.position, st.scale);
+                // Surface-local LOGICAL coords. This app's widget geometry is logical (the
+                // window tracks `width / scale`), and every other consumer — the Json
+                // dispatch and `FuzzelWidget::on_event` below — already uses the raw
+                // `event.position`. `scale_pointer_pos` multiplies by the scale, so feeding
+                // its result to the scroll region compared PHYSICAL cursor coords against a
+                // LOGICAL rect: on a scale-2 output the wheel silently stopped working past
+                // the list's midpoint (cursor at logical x=250 arrived as 500 against a rect
+                // ending at 285, so `hit()` was false and nothing scrolled).
+                let (cx, cy) = (event.position.0 as f32, event.position.1 as f32);
                 match &event.kind {
                     PointerEventKind::Motion { .. } => {
                         st.cursor_x = cx;
@@ -1735,6 +1743,12 @@ impl PointerHandler for AppState {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
+                        } else if st.fuzzel.scroll_box.cursor_moved(cx, cy) {
+                            // Returns true only while a thumb drag is live; it also keeps
+                            // `hovered` current for the wheel/keyboard scope either way.
+                            st.fuzzel.update_scroll();
+                            st.upload_vertices();
+                            self.redraw = true;
                         }
                     }
                     PointerEventKind::Press { button, .. } => {
@@ -1762,6 +1776,15 @@ impl PointerHandler for AppState {
                                     st.upload_vertices();
                                     self.redraw = true;
                                 }
+                            } else if st.fuzzel.scroll_box.press(cx, cy) {
+                                // Thumb grab or track jump. This must be handled here rather
+                                // than inside `on_event`, because the row branch below treats
+                                // ANY handled press as a selection and — in Dmenu/switcher
+                                // mode — commits it and closes the popup. A scrollbar press
+                                // must scroll, not choose.
+                                st.fuzzel.update_scroll();
+                                st.upload_vertices();
+                                self.redraw = true;
                             } else {
                                 let prev_selected = st.fuzzel.selected;
                                 let changed = {
@@ -1866,6 +1889,11 @@ impl PointerHandler for AppState {
                                     self.selected_item = Some(out_str);
                                     should_close = true;
                                 }
+                            } else if st.fuzzel.scroll_box.release() {
+                                // Ends a thumb drag. Returns true only if one was live, so a
+                                // plain click on a row is unaffected.
+                                st.upload_vertices();
+                                self.redraw = true;
                             }
                         }
                     }
