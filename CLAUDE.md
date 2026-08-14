@@ -5,11 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 `cce-cloud` is the **launcher / popup app** of the cce Wayland desktop environment: a
-fuzzel-style fuzzy launcher, a dmenu replacement, a Super-Tab window switcher, and a
-generic JSON-defined popup panel — all in one binary. It is one crate of the cce
-multi-repo workspace; workspace-wide conventions (multi-repo layout, no
-`[workspace.dependencies]`, shared `../target/`) live in **`../CLAUDE.md`** — read that
-too.
+fuzzel-style fuzzy launcher, a dmenu replacement, a Super-Tab window switcher, and a generic
+JSON-defined popup panel — all in one binary. It is one crate of the cce multi-repo
+workspace; workspace-wide conventions (multi-repo layout, no `[workspace.dependencies]`,
+shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that too.
 
 Three source files, all logic in `src/main.rs` (~3.3k lines):
 
