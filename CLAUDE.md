@@ -103,6 +103,18 @@ layer-shell **Overlay** surface with exclusive keyboard. The window continuously
 auto-sizes to its content (`update_desired_size`, measured via glyphon text buffers)
 and closes through a ~150ms fade-out (`trigger_close` → `fade_factor`).
 
+`-x/-y` is a *cursor* position (the compositor hands the raw pointer to the desktop
+and window-border context menus), not a final window origin — `Placement` fits it to
+the output: grow away from the anchor, flip to its other side when the window would
+overhang, clamp only when it fits on neither side, with the flip latched for the
+popup's life so an auto-sizing list can't snap back and forth across the cursor.
+Because the size is not known until the content is measured, the anchor/margins are
+set by `apply_placement()` after the first `update_desired_size()` and re-applied by
+`resize_window()` on every subsequent resize — a one-shot placement at surface
+creation would use the pre-layout estimate and clip. The surface asks for
+`exclusive_zone(-1)` so that the box it is clamped against (the wl_output logical
+geometry) is the same one the compositor places it in.
+
 ### State flow
 
 Stdin/socket items land in a shared `Arc<Mutex<StdinState>>` written by a reader

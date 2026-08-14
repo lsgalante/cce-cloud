@@ -708,6 +708,101 @@ enum AppWindow {
     Xdg(XdgWindow),
 }
 
+/// Logical-px breathing room kept between a positioned popup and the screen edge.
+const EDGE_GAP: i32 = 8;
+
+/// Logical geometry `(x, y, w, h)` of the output containing the point `(x, y)`, or —
+/// when the point is off every output — the first one that advertises a geometry.
+/// `None` if no output does (nothing to clamp against; the request is used raw).
+fn output_bounds_at(output_state: &OutputState, x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
+    let mut fallback = None;
+    for output in output_state.outputs() {
+        let Some(info) = output_state.info(&output) else { continue };
+        let (Some((ox, oy)), Some((ow, oh))) = (info.logical_position, info.logical_size) else {
+            continue;
+        };
+        if (ox..ox + ow).contains(&x) && (oy..oy + oh).contains(&y) {
+            return Some((ox, oy, ow, oh));
+        }
+        fallback.get_or_insert((ox, oy, ow, oh));
+    }
+    fallback
+}
+
+/// Where a `-x/-y` popup wants to sit, and the output it must stay inside.
+///
+/// The requested point is a cursor position (the compositor passes the pointer
+/// straight through for the desktop/window context menus), so the fit rule is the
+/// usual menu one: grow away from the anchor, **flip** to the other side of it when
+/// the window would overhang, and clamp only when it fits on neither side.
+///
+/// The flip decision latches for the life of the popup. The window auto-sizes to its
+/// content continuously (`update_desired_size`), so re-deciding on every resize makes
+/// a filtering list snap back and forth across the cursor.
+///
+/// `bounds` is the whole output, not the layer-shell *usable* area — which is why the
+/// surface asks for `exclusive_zone(-1)`. Without it a panel's exclusive zone would
+/// shrink the box the compositor places against while this math still used the full
+/// output, and the clamp would be wrong by exactly the panel's height.
+#[derive(Clone, Copy, Debug)]
+struct Placement {
+    /// Requested anchor, in layout (logical) coordinates.
+    x: i32,
+    y: i32,
+    /// `--align-right`: the anchor is `x` in from the right edge and the window
+    /// grows leftward from it.
+    align_right: bool,
+    /// The output to stay inside, as `(x, y, w, h)` in logical coords. `None` when no
+    /// output advertised a logical geometry — then the raw request is used unchanged.
+    bounds: Option<(i32, i32, i32, i32)>,
+    flip_x: Option<bool>,
+    flip_y: Option<bool>,
+}
+
+impl Placement {
+    fn new(x: i32, y: i32, align_right: bool, bounds: Option<(i32, i32, i32, i32)>) -> Self {
+        Self { x, y, align_right, bounds, flip_x: None, flip_y: None }
+    }
+
+    /// Anchor + `(top, right, bottom, left)` margins for a `w`x`h` logical-px layer
+    /// surface. Always top-left anchored when the output is known: the margins are
+    /// recomputed on every resize anyway, so a left-growing popup is expressed by
+    /// moving its left edge rather than by anchoring the right one.
+    fn resolve(&mut self, w: i32, h: i32) -> (Anchor, (i32, i32, i32, i32)) {
+        let Some((ox, oy, ow, oh)) = self.bounds else {
+            return if self.align_right {
+                (Anchor::TOP | Anchor::RIGHT, (self.y, self.x, 0, 0))
+            } else {
+                (Anchor::TOP | Anchor::LEFT, (self.y, 0, 0, self.x))
+            };
+        };
+
+        // Output-local anchor. In align-right mode `x` is measured from the right
+        // edge and the window hangs to the left of the point.
+        let anchor_x = if self.align_right { ow - self.x } else { self.x - ox };
+        let (nat_x, alt_x) = if self.align_right {
+            (anchor_x - w, anchor_x)
+        } else {
+            (anchor_x, anchor_x - w)
+        };
+        let left = Self::fit(&mut self.flip_x, nat_x, alt_x, w, ow);
+        let top = Self::fit(&mut self.flip_y, self.y - oy, self.y - oy - h, h, oh);
+
+        (Anchor::TOP | Anchor::LEFT, (top, 0, 0, left))
+    }
+
+    /// Pick between the natural and flipped edge for one axis, then clamp into
+    /// `[EDGE_GAP, extent - size - EDGE_GAP]`. Latches the choice in `flip`.
+    fn fit(flip: &mut Option<bool>, natural: i32, flipped: i32, size: i32, extent: i32) -> i32 {
+        let fits = |start: i32| start >= EDGE_GAP && start + size <= extent - EDGE_GAP;
+        let flipped_is_better = *flip.get_or_insert(!fits(natural) && fits(flipped));
+        let start = if flipped_is_better { flipped } else { natural };
+        // A window taller/wider than the output has no in-range clamp; pin it to the
+        // near edge rather than letting max() invert the range.
+        start.clamp(EDGE_GAP, (extent - size - EDGE_GAP).max(EDGE_GAP))
+    }
+}
+
 struct State {
     window: Option<AppWindow>,
     wl_surface: wl_surface::WlSurface,
@@ -749,6 +844,9 @@ struct State {
     window_bg: [f32; 4],
     window_radius: f32,
     select_and_close_requested: bool,
+    /// `Some` for `-x/-y` popups (always layer-shell): re-applied on every resize so
+    /// an auto-sizing window can't grow off the screen edge.
+    placement: Option<Placement>,
 }
 
 /// Logical-px width one JSON-layout widget wants for the auto-sizing popup.
@@ -788,6 +886,7 @@ impl State {
         x_pos: Option<i32>,
         y_pos: Option<i32>,
         align_right: bool,
+        output_bounds: Option<(i32, i32, i32, i32)>,
         scale: f64,
         select_item: Option<String>,
         switcher_mode: bool,
@@ -880,6 +979,10 @@ impl State {
             "cce-cloud".to_string()
         };
 
+        let placement = (x_pos.is_some() || y_pos.is_some()).then(|| {
+            Placement::new(x_pos.unwrap_or(0), y_pos.unwrap_or(0), align_right, output_bounds)
+        });
+
         let mut cce_toplevel = None;
         let window = if use_xdg {
             let xdg_shell = xdg_shell_state.expect("XdgShell state is required for XDG mode");
@@ -904,18 +1007,17 @@ impl State {
             );
             layer_window.set_size(width, height);
             layer_window.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-            if x_pos.is_some() || y_pos.is_some() {
-                let x = x_pos.unwrap_or(0);
-                let y = y_pos.unwrap_or(0);
-                if align_right {
-                    layer_window.set_anchor(Anchor::TOP | Anchor::RIGHT);
-                    layer_window.set_margin(y, x, 0, 0);
-                } else {
-                    layer_window.set_anchor(Anchor::TOP | Anchor::LEFT);
-                    layer_window.set_margin(y, 0, 0, x);
-                }
-            } else {
+            if placement.is_none() {
                 layer_window.set_anchor(Anchor::empty());
+            } else {
+                // Place against the full output, not the area left over by panels:
+                // `Placement` clamps against the wl_output geometry, and the two must
+                // agree on the box or the clamp is off by the panel's exclusive zone.
+                layer_window.set_exclusive_zone(-1);
+                // The anchor/margins are left to the first `apply_placement()`, once
+                // the content has actually been measured — the size passed above is a
+                // pre-layout estimate, and latching the flip decision on it would flip
+                // menus that fit and clip ones that don't.
             }
             wl_surface.commit();
             AppWindow::Layer(layer_window)
@@ -1059,11 +1161,16 @@ impl State {
             window_bg: bg_color,
             window_radius,
             select_and_close_requested: false,
+            placement,
         };
 
         let t = std::time::Instant::now();
         state.check_stdin_updates();
         state.update_desired_size();
+        // update_desired_size only re-places when the size actually moved off the
+        // estimate; a popup that happened to be estimated exactly still needs its
+        // first anchor.
+        state.apply_placement();
         state.apply_layout();
         state.upload_vertices();
         log::debug!("[timing] initial layout/upload: {:?}", t.elapsed());
@@ -1141,22 +1248,7 @@ impl State {
                 let target_height = jl.page_total_heights[active_page].min(self.max_height as f32);
                 let target_width = max_widget_w.clamp(120.0, self.max_width as f32);
                 
-                let target_height_u32 = target_height.round() as u32;
-                let target_width_u32 = target_width.round() as u32;
-                
-                if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
-                    if let Some(ref window) = self.window {
-                        match window {
-                            AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
-                            AppWindow::Xdg(_) => {}
-                        }
-                    }
-                    self.wl_surface.commit();
-                    
-                    let pw = (target_width_u32 as f64 * self.scale) as u32;
-                    let ph = (target_height_u32 as f64 * self.scale) as u32;
-                    self.resize(pw, ph);
-                }
+                self.resize_window(target_width.round() as u32, target_height.round() as u32);
             }
             return;
         }
@@ -1199,22 +1291,36 @@ impl State {
         let needed_width = max_text_w + 50.0 + scrollbar_w;
         let target_width = needed_width.clamp(300.0, self.max_width as f32);
 
-        let target_height_u32 = target_height.round() as u32;
-        let target_width_u32 = target_width.round() as u32;
-        
-        if self.width as u32 != target_width_u32 || self.height as u32 != target_height_u32 {
-            if let Some(ref window) = self.window {
-                match window {
-                    AppWindow::Layer(layer) => layer.set_size(target_width_u32, target_height_u32),
-                    AppWindow::Xdg(_) => {}
-                }
-            }
-            self.wl_surface.commit();
-            
-            let pw = (target_width_u32 as f64 * self.scale) as u32;
-            let ph = (target_height_u32 as f64 * self.scale) as u32;
-            self.resize(pw, ph);
+        self.resize_window(target_width.round() as u32, target_height.round() as u32);
+    }
+
+    /// Grow/shrink the window to `w`x`h` logical px, and re-place it so the new size
+    /// still fits on screen. No-op when the size is unchanged.
+    fn resize_window(&mut self, w: u32, h: u32) {
+        if self.width as u32 == w && self.height as u32 == h {
+            return;
         }
+        if let Some(AppWindow::Layer(ref layer)) = self.window {
+            layer.set_size(w, h);
+        }
+        let pw = (w as f64 * self.scale) as u32;
+        let ph = (h as f64 * self.scale) as u32;
+        self.resize(pw, ph);
+        // After `resize`, so the placement sees the size it is fitting.
+        self.apply_placement();
+        self.wl_surface.commit();
+    }
+
+    /// Re-anchor a `-x/-y` popup for its current size. Popups without an explicit
+    /// position are centered by the compositor and xdg toplevels are placed by it, so
+    /// both are left alone.
+    fn apply_placement(&mut self) {
+        let Some(ref mut placement) = self.placement else { return };
+        let Some(AppWindow::Layer(ref layer)) = self.window else { return };
+        let (anchor, (top, right, bottom, left)) =
+            placement.resolve(self.width.round() as i32, self.height.round() as i32);
+        layer.set_anchor(anchor);
+        layer.set_margin(top, right, bottom, left);
     }
 
     fn apply_layout(&mut self) {
@@ -2330,6 +2436,7 @@ fn run_standalone() {
         x_pos,
         y_pos,
         align_right,
+        output_bounds_at(&app.output_state, x_pos.unwrap_or(0), y_pos.unwrap_or(0)),
         scale,
         select_item,
         switcher_mode,
@@ -2841,6 +2948,7 @@ fn run_daemon(socket_path: &str) {
             x_pos,
             y_pos,
             align_right,
+            output_bounds_at(&app.output_state, x_pos.unwrap_or(0), y_pos.unwrap_or(0)),
             scale,
             select_item,
             switcher_mode,
@@ -3041,6 +3149,92 @@ fn main() {
                 run_standalone();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    /// A 1920x1200 logical output at the layout origin.
+    const SCREEN: Option<(i32, i32, i32, i32)> = Some((0, 0, 1920, 1200));
+
+    /// `(left, top)` of a `w`x`h` popup anchored at `(x, y)`.
+    fn place(x: i32, y: i32, w: i32, h: i32) -> (i32, i32) {
+        let (_, (top, _, _, left)) = Placement::new(x, y, false, SCREEN).resolve(w, h);
+        (left, top)
+    }
+
+    #[test]
+    fn interior_anchor_is_used_verbatim() {
+        assert_eq!(place(400, 300, 200, 250), (400, 300));
+    }
+
+    #[test]
+    fn overhanging_popup_flips_to_the_other_side_of_the_cursor() {
+        // The desktop context menu at (1800, 1050) with a 200x250 body: it ran off
+        // both edges before, and now hangs up-and-left of the cursor instead.
+        assert_eq!(place(1800, 1050, 200, 250), (1600, 800));
+        // One axis at a time.
+        assert_eq!(place(1850, 300, 200, 250), (1650, 300));
+        assert_eq!(place(400, 1150, 200, 250), (400, 900));
+    }
+
+    #[test]
+    fn a_popup_that_fits_on_neither_side_clamps_to_the_edge_gap() {
+        // Anchored in the far corner, so flipping alone still leaves it off-screen.
+        assert_eq!(place(1919, 1199, 200, 250), (1920 - 200 - EDGE_GAP, 1200 - 250 - EDGE_GAP));
+        // Bigger than the output on both axes: pin to the near edge rather than
+        // letting the clamp range invert.
+        assert_eq!(place(500, 500, 3000, 3000), (EDGE_GAP, EDGE_GAP));
+    }
+
+    #[test]
+    fn align_right_measures_the_anchor_from_the_right_edge() {
+        // `x` in from the right, growing leftward: right edge at 1920-100, so left
+        // edge at 1620.
+        let mut p = Placement::new(100, 300, true, SCREEN);
+        let (_, (top, _, _, left)) = p.resolve(200, 250);
+        assert_eq!((left, top), (1620, 300));
+        // Wider than the room to its left, so it flips and grows rightward instead.
+        let mut p = Placement::new(1850, 300, true, SCREEN);
+        let (_, (_, _, _, left)) = p.resolve(200, 250);
+        assert_eq!(left, 1920 - 1850);
+    }
+
+    #[test]
+    fn the_flip_decision_latches_across_resizes() {
+        // The popup auto-sizes as its list filters. Once flipped it stays flipped:
+        // unlatching would snap the window back across the cursor mid-typing.
+        let mut p = Placement::new(400, 1150, false, SCREEN);
+        assert_eq!(p.resolve(200, 250).1 .0, 900); // flips up
+        assert_eq!(p.resolve(200, 100).1 .0, 1050); // shrinks upward, still flipped
+    }
+
+    #[test]
+    fn the_anchor_is_output_local_on_a_secondary_output() {
+        // Layer-shell margins are relative to the output, but `-x/-y` are layout
+        // coordinates — the output origin has to come back off.
+        let mut p = Placement::new(2320, 300, false, Some((1920, 0, 1920, 1200)));
+        assert_eq!(p.resolve(200, 250).1 .3, 400);
+    }
+
+    #[test]
+    fn the_window_switcher_geometry_is_untouched() {
+        // window_manager.rs centers the 600-wide switcher horizontally and drops it
+        // 80px down. It already fits, so placement must be a no-op for it.
+        assert_eq!(place((1920 - 600) / 2, 80, 600, 800), (660, 80));
+    }
+
+    #[test]
+    fn an_unknown_output_falls_back_to_the_raw_request() {
+        let (anchor, margins) = Placement::new(1800, 1050, false, None).resolve(200, 250);
+        assert_eq!(anchor, Anchor::TOP | Anchor::LEFT);
+        assert_eq!(margins, (1050, 0, 0, 1800));
+
+        let (anchor, margins) = Placement::new(1800, 1050, true, None).resolve(200, 250);
+        assert_eq!(anchor, Anchor::TOP | Anchor::RIGHT);
+        assert_eq!(margins, (1050, 1800, 0, 0));
     }
 }
 
