@@ -125,7 +125,7 @@ impl ScrollRegion {
         (sb_x, track_y, sb_w, track_h, thumb_y, thumb_h)
     }
 
-    fn hit_scrollbar(&self, px: f32, py: f32) -> bool {
+    pub fn hit_scrollbar(&self, px: f32, py: f32) -> bool {
         if self.content_h <= self.viewport_h {
             return false;
         }

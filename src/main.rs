@@ -657,10 +657,22 @@ impl cce_ui::widget::Input for FuzzelWidget {
         } = event
         {
             let item_h = 25.0;
-            if self.scroll_box.hit(*px, *py) {
+            // `hit()` spans the whole region, scrollbar strip included, and the row math
+            // below accepts any y inside it — so without these two gates a press on the
+            // scrollbar, or on the partially-clipped sliver at the viewport edge, resolved
+            // to a row. In Dmenu/switcher mode a press commits and closes, so that emitted
+            // an item the user never clicked (and, on the sliver, never even saw).
+            if self.scroll_box.hit(*px, *py) && !self.scroll_box.hit_scrollbar(*px, *py) {
                 let click_virtual_y = *py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
                 let clicked_idx = (click_virtual_y / item_h).floor() as usize;
-                if clicked_idx < self.filtered_items.len() {
+                // Same predicate the paint loop virtualizes on, so only a row actually
+                // drawn this frame is selectable.
+                if clicked_idx < self.filtered_items.len()
+                    && self
+                        .scroll_box
+                        .get_draw_y(clicked_idx as f32 * item_h, item_h)
+                        .is_some()
+                {
                     self.selected = clicked_idx;
                     return true;
                 }
