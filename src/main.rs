@@ -42,7 +42,7 @@ use wayland_client::{
 };
 use calloop_wayland_source::WaylandSource;
 
-use glyphon::{Attrs, Buffer, FontSystem, Metrics, SwashCache};
+use cce_ui::cosmic_text::{Attrs, Buffer, FontSystem, Metrics, SwashCache};
 
 use cce_ui::vk::{Batch2D, Frame2D, TextSpan, VkRenderer};
 
@@ -88,8 +88,8 @@ fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buff
     let metrics = Metrics::new(size, size * 1.4);
     let mut buffer = Buffer::new(font_system, metrics);
     let font_family = cce_ui::layout::control_label_font_parsed().0;
-    let attrs = Attrs::new().family(glyphon::Family::Name(&font_family));
-    buffer.set_text(font_system, text, attrs, glyphon::Shaping::Advanced);
+    let attrs = Attrs::new().family(cce_ui::cosmic_text::Family::Name(&font_family));
+    buffer.set_text(font_system, text, attrs, cce_ui::cosmic_text::Shaping::Advanced);
     buffer.shape_until_scroll(font_system, true);
     buffer
 }
@@ -3059,7 +3059,7 @@ fn run_daemon(socket_path: &str) {
                 &mut st.font_system,
                 FontSystem::new_with_locale_and_db(
                     "en-US".to_string(),
-                    glyphon::cosmic_text::fontdb::Database::new(),
+                    cce_ui::cosmic_text::fontdb::Database::new(),
                 ),
             );
             let sc = std::mem::replace(&mut st.swash_cache, SwashCache::new());
