@@ -625,6 +625,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
                         Prim::ConcaveFillet { cx, cy, radius, depth, start, raised } => {
                             pc.concave_fillet(cx, cy, radius, depth, start, raised)
                         }
+                        Prim::Groove { a, b, width, depth, host } => pc.groove(a, b, width, depth, host),
                         Prim::Image { image, rect, alpha } => pc.image(image, rect, alpha),
                     }
                     if clip_circle.is_some() {
