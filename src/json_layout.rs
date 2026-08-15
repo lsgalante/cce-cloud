@@ -599,35 +599,11 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
                     if let Some(c) = clip_circle {
                         pc.push_clip_circle(c);
                     }
-                    match item.prim {
-                        Prim::Text { .. } => {}
-                        Prim::Quad { rect, color } => pc.quad(rect, color),
-                        Prim::RoundedRect { rect, radius, corners, color } => pc.rounded_rect(rect, radius, corners, color),
-                        Prim::Border { rect, radii, fill, border, thickness } => pc.border(rect, radii, fill, border, thickness),
-                        Prim::Bevel { rect, radii, color, depth, tint } => pc.bevel_tinted(rect, radii, color, depth, tint),
-                        Prim::Recess { rect, radii, depth, edges, tint } => match tint {
-                            Some(t) => pc.recess_tinted(rect, radii, depth, t),
-                            None => pc.recess_edges(rect, radii, depth, edges),
-                        },
-                        Prim::Boss { rect, radii, depth, edges, tint } => match tint {
-                            Some(t) => pc.boss_edges_tinted(rect, radii, depth, edges, t),
-                            None => pc.boss_edges(rect, radii, depth, edges),
-                        },
-                        Prim::Ridge { rect, radii, depth, edges } => pc.ridge_edges(rect, radii, depth, edges),
-                        Prim::Plate { rect, radii, color, depth } => pc.plate(rect, radii, color, depth),
-                        Prim::Arc { cx, cy, radius, thickness, start, end, color } => pc.arc(cx, cy, radius, thickness, start, end, color),
-                        Prim::ArcShaded { cx, cy, radius, thickness, start, end, inner, crest, outer } => {
-                            pc.arc_shaded(cx, cy, radius, thickness, start, end, inner, crest, outer)
-                        }
-                        Prim::Vector { x1, y1, x2, y2, thickness, color, cap } => pc.vector(x1, y1, x2, y2, thickness, color, cap),
-                        Prim::Circle { cx, cy, radius, color } => pc.circle(cx, cy, radius, color),
-                        Prim::Sphere { cx, cy, radius, color } => pc.sphere(cx, cy, radius, color),
-                        Prim::ConcaveFillet { cx, cy, radius, depth, start, raised } => {
-                            pc.concave_fillet(cx, cy, radius, depth, start, raised)
-                        }
-                        Prim::Groove { a, b, width, depth, host } => pc.groove(a, b, width, depth, host),
-                        Prim::Image { image, rect, alpha } => pc.image(image, rect, alpha),
-                    }
+                    // One forwarding match, in cce-ui: `PaintCtx::replay` emits
+                    // every prim but Text and returns Text for the caller to
+                    // decide. Here the widget's own label bridge supplies the
+                    // text, so the returned prim is dropped.
+                    let _ = pc.replay(item.prim);
                     if clip_circle.is_some() {
                         pc.pop_clip_circle();
                     }
