@@ -1,5 +1,5 @@
 //! App-owned scroll region replacing the dissolved `ScrollBox` embedded base (the Phase
-//! 6q ScrollRegion, ported via cce-email). The fuzzel list drew its own rows at
+//! 6q ScrollRegion, ported via cce-mail). The fuzzel list drew its own rows at
 //! `get_draw_y` positions; the ScrollBox contributed only the flat background, the
 //! scrollbar, the scroll math, and wheel input — `push_quads` and the ScrollBox-shaped
 //! shims below reproduce those verbatim.
