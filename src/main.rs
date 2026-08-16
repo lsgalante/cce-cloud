@@ -44,7 +44,7 @@ use calloop_wayland_source::WaylandSource;
 
 use cce_ui::cosmic_text::{Attrs, Buffer, FontSystem, Metrics, SwashCache};
 
-use cce_ui::vk::{Batch2D, Frame2D, TextSpan, VkRenderer};
+use cce_ui::vk::{Batch2D, Frame2D, ImageQuad, TextSpan, VkRenderer};
 
 // Vertex is shared from the cce-ui engine.
 pub(crate) use cce_ui::engine::Vertex;
@@ -58,9 +58,35 @@ fn tessellate(
     dl: &cce_ui::scene::paint::DisplayList,
     sw: f32, sh: f32,
     scale: f32,
-) -> (Vec<Vertex>, Vec<Batch2D>, Vec<[f32; 12]>) {
-    let (verts, dl_batches, _images, features) =
+) -> (Vec<Vertex>, Vec<Batch2D>, Vec<ImageQuad>, Vec<[f32; 12]>) {
+    let (verts, dl_batches, dl_images, features) =
         cce_ui::backend::window_runner::tessellate_display_list(dl, sw, sh, scale);
+    // Images ride a separate pipeline from the vertex batches, so they have to
+    // be carried across explicitly — this return value used to be dropped and
+    // `Frame2D::images` hardcoded to &[], which made `PaintCtx::image` a silent
+    // no-op in this app while working fine in every engine-runner client.
+    let images = dl_images
+        .iter()
+        .map(|di| ImageQuad {
+            image: di.image,
+            rect: (
+                di.rect.x * scale,
+                di.rect.y * scale,
+                di.rect.width * scale,
+                di.rect.height * scale,
+            ),
+            alpha: di.alpha,
+            z_before: di.at,
+            clip: di.clip.map(|c| {
+                (
+                    (c.x * scale).max(0.0) as u32,
+                    (c.y * scale).max(0.0) as u32,
+                    (c.width * scale) as u32,
+                    (c.height * scale) as u32,
+                )
+            }),
+        })
+        .collect();
     let batches = dl_batches
         .iter()
         .map(|b| Batch2D {
@@ -81,7 +107,7 @@ fn tessellate(
             blur_behind: b.blur_behind,
         })
         .collect();
-    (verts, batches, features)
+    (verts, batches, images, features)
 }
 
 fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buffer {
@@ -235,6 +261,7 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
     let mut is_application = true;
     let mut no_display = false;
     let mut terminal = false;
+    let mut icon = None;
 
     for line in reader.lines() {
         let line = line.ok()?;
@@ -263,6 +290,11 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
                     "Exec" => {
                         if exec.is_none() {
                             exec = Some(clean_exec_command(value));
+                        }
+                    }
+                    "Icon" => {
+                        if icon.is_none() && !value.is_empty() {
+                            icon = Some(value.to_string());
                         }
                     }
                     "Type" => {
@@ -295,7 +327,7 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
 
     if is_application && !no_display {
         if let (Some(n), Some(e)) = (name, exec) {
-            return Some(AppInfo { name: n, exec: e, terminal });
+            return Some(AppInfo { name: n, exec: e, terminal, icon });
         }
     }
     None
@@ -509,8 +541,20 @@ pub struct FuzzelWidget {
     all_items: Vec<String>,
     filtered_items: Vec<String>,
     selected: usize,
+    /// Item text → `(image id, px w, px h)` for the rows that resolved an icon.
+    /// Keyed by text rather than index because filtering rebuilds the index
+    /// space on every keystroke while the text is what identifies a row.
+    icons: std::collections::HashMap<String, (u32, u32, u32)>,
+    /// Width reserved for the icon column, 0 when no row has an icon. Applied to
+    /// every row, not just the ones that resolved, so a list with one missing
+    /// icon keeps a straight text edge instead of ragging in and out.
+    icon_gutter: f32,
     pub scroll_box: ScrollRegion,
 }
+
+/// Icon edge length inside a 25px row, and the gap between it and the label.
+const ICON_PX: f32 = 17.0;
+const ICON_GAP: f32 = 8.0;
 
 impl FuzzelWidget {
     pub fn new(prompt: String) -> cce_ui::widget::Adapted<FuzzelWidget> {
@@ -524,6 +568,8 @@ impl FuzzelWidget {
             all_items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
+            icons: std::collections::HashMap::new(),
+            icon_gutter: 0.0,
             scroll_box: ScrollRegion::new(22.0, 0.0),
         })
     }
@@ -531,6 +577,30 @@ impl FuzzelWidget {
     pub fn set_items(&mut self, items: Vec<String>) {
         self.all_items = items;
         self.filter();
+    }
+
+    /// Give rows an icon column. Only Apps mode calls this — Dmenu/Path items
+    /// are arbitrary strings with nothing to look an icon up by, and they keep
+    /// the flush-left layout they have always had because the gutter stays 0.
+    pub fn set_item_icons(&mut self, icons: std::collections::HashMap<String, (u32, u32, u32)>) {
+        self.icon_gutter = if icons.is_empty() { 0.0 } else { ICON_PX + ICON_GAP };
+        self.icons = icons;
+    }
+
+    /// The square an icon is fitted into for the row drawn at `draw_y`.
+    fn icon_rect(&self, draw_y: f32, item_h: f32, w: u32, h: u32) -> cce_ui::scene::layout::Rect {
+        let pad = 15.0;
+        // Fit the longer side to ICON_PX so a non-square icon keeps its aspect
+        // ratio and stays centered in the column.
+        let (w, h) = (w.max(1) as f32, h.max(1) as f32);
+        let s = ICON_PX / w.max(h);
+        let (iw, ih) = (w * s, h * s);
+        cce_ui::scene::layout::Rect {
+            x: self.x + pad + 10.0 + (ICON_PX - iw) / 2.0,
+            y: draw_y + (item_h - ih) / 2.0,
+            width: iw,
+            height: ih,
+        }
     }
 
     pub fn filter(&mut self) {
@@ -639,6 +709,18 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             }
         }
 
+        // App icons, on the same virtualization predicate as the labels below:
+        // only rows `get_draw_y` places inside the viewport are emitted, so a
+        // 300-app list still costs one image quad per visible row.
+        if self.icon_gutter > 0.0 {
+            for (idx, item_text) in self.filtered_items.iter().enumerate() {
+                let Some((image, iw, ih)) = self.icons.get(item_text).copied() else { continue };
+                if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
+                    ctx.image(image, self.icon_rect(draw_y, item_h, iw, ih), 1.0);
+                }
+            }
+        }
+
         // Own labels: prompt/query line, visible items, empty-state notice.
         for l in self.own_labels() {
             ctx.text(l.text, l.x, l.y, l.font_size, l.color);
@@ -697,6 +779,10 @@ struct AppInfo {
     name: String,
     exec: String,
     terminal: bool,
+    /// The entry's `Icon=` key, resolved against the icon theme at display time.
+    /// A theme name (`cce-files`), or an absolute path — both are legal per the
+    /// desktop-entry spec, and `cce_ui::icon` handles the distinction.
+    icon: Option<String>,
 }
 
 struct StdinState {
@@ -823,6 +909,7 @@ struct State {
     renderer: Option<VkRenderer>,
     vertex_data: Vec<Vertex>,
     frame_batches: Vec<Batch2D>,
+    frame_images: Vec<ImageQuad>,
     plate_features: Vec<[f32; 12]>,
 
     fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
@@ -1101,6 +1188,29 @@ impl State {
             apps = scan_apps();
             sort_apps_by_history(&mut apps);
             let app_names: Vec<String> = apps.iter().map(|app| app.name.clone()).collect();
+
+            // Resolve every entry's Icon= against the icon theme. Uploads are
+            // per-popup by design (see cce_ui::icon::upload_themed): the daemon
+            // tears its VkRenderer down between popups, so an id cached across
+            // them would name freed GPU resources. Only the decode is cached, so
+            // the second open of the launcher skips the disk and the rasterizer.
+            let t_icons = std::time::Instant::now();
+            let icons: std::collections::HashMap<String, (u32, u32, u32)> = apps
+                .iter()
+                .filter_map(|app| {
+                    let name = app.icon.as_deref()?;
+                    let img = cce_ui::icon::upload_themed(name, ICON_PX.ceil() as u32 * 2)?;
+                    Some((app.name.clone(), img))
+                })
+                .collect();
+            log::debug!(
+                "[timing] app icons: {} of {} resolved in {:?}",
+                icons.len(),
+                apps.len(),
+                t_icons.elapsed()
+            );
+            fuzzel.set_item_icons(icons);
+
             if let Ok(mut lock_state) = stdin_state.lock() {
                 lock_state.items = app_names;
                 lock_state.new_data = true;
@@ -1136,6 +1246,7 @@ impl State {
             renderer: Some(renderer),
             vertex_data: Vec::new(),
             frame_batches: Vec::new(),
+            frame_images: Vec::new(),
             plate_features: Vec::new(),
             fuzzel,
             json_layout,
@@ -1385,11 +1496,17 @@ impl State {
 
     fn upload_vertices(&mut self) {
         let dl = self.collect_display_list();
-        let (mut verts, mut batches, features) =
+        let (mut verts, mut batches, mut images, features) =
             tessellate(&dl, self.width, self.height, self.scale as f32);
         if self.fade_factor < 1.0 {
             for v in &mut verts {
                 v.color[3] *= self.fade_factor;
+            }
+            // Images carry their own alpha rather than a vertex color, so they
+            // need the fade applied here too or every app icon would stay fully
+            // opaque over a list dissolving underneath it.
+            for i in &mut images {
+                i.alpha *= self.fade_factor;
             }
             // SDF-plate overlays (the recess rims) are shader-lit, not
             // vertex-alpha — drop them during the close fade rather than let
@@ -1400,6 +1517,7 @@ impl State {
         // vertex_data every frame.
         self.vertex_data = verts;
         self.frame_batches = batches;
+        self.frame_images = images;
         self.plate_features = features;
     }
 
@@ -1473,7 +1591,7 @@ impl State {
             verts: &self.vertex_data,
             batches: &self.frame_batches,
             overlay_verts: &[],
-            images: &[],
+            images: &self.frame_images,
             plate_features: &self.plate_features,
             clear_color: [0.0; 4],
         });
@@ -3741,7 +3859,9 @@ impl FuzzelWidget {
 
                 labels.push(TextLabel {
                     text: item_text.clone(),
-                    x: self.x + pad + 10.0,
+                    // Indented past the icon column whether or not THIS row
+                    // resolved an icon — see `icon_gutter`.
+                    x: self.x + pad + 10.0 + self.icon_gutter,
                     y: draw_y + 4.0,
                     font_size: 13.0,
                     color,

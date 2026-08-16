@@ -68,7 +68,14 @@ needs-stdin decision, in `run_client()`).
 - `Path` — executables scanned from `$PATH`.
 - `Apps` — `.desktop` files from the standard application dirs, sorted by launch
   frecency persisted in `~/.cache/cce-cloud-apps.json`; selecting spawns the app's
-  `Exec` (spawn output logged to `/tmp/cce-spawn.log`).
+  `Exec` (spawn output logged to `/tmp/cce-spawn.log`). Each entry's `Icon=` is
+  resolved through `cce_ui::icon` and drawn in a gutter left of the label — the
+  gutter is applied to every row, so one unresolvable icon doesn't rag the text
+  edge. This is the *only* mode with icons: Dmenu/Path items are arbitrary
+  strings with nothing to look up, and `set_item_icons` leaves their gutter at 0.
+  Icons are uploaded per popup on purpose (`cce_ui::icon::upload_themed` caches
+  the decode, not the image id) because `Drop` destroys this app's `VkRenderer`
+  between popups and an id cached across them would name freed GPU resources.
 - `Json` — a `JsonLayoutConfig` read from stdin builds a widget panel; clicking a
   button prints one JSON object with the button id and every control's state
   (`{"button", "checkboxes", "spinboxes", "colors", "sliders"}`) and closes.
@@ -89,7 +96,11 @@ runs it through `tessellate_display_list` into `State::vertex_data` + `frame_bat
 from the paint walk (buffers shaped at logical size, spans scaled to physical; fade
 alpha rides `default_color`), and `render` is `draw_frame_2d(Frame2D { .. })`. During
 the close fade, shader-lit plate batches (recess rims) are dropped — their shading is
-not vertex-alpha and would linger at full strength. `State::renderer` is an `Option`
+not vertex-alpha and would linger at full strength. `tessellate` must carry the tessellator's image
+list across to `Frame2D::images`: images ride a separate pipeline from the vertex
+batches, and that return value was dropped (with `images: &[]` hardcoded) until
+2026-08-16, which made `PaintCtx::image` a silent no-op *in this app only* while
+it worked in every engine-runner client. `State::renderer` is an `Option`
 solely so `Drop` can tear the swapchain down before destroying the `wl_surface` (daemon
 mode churns one `State` per popup). It still reuses cce-ui pieces à la carte: the
 narrow widget traits (`Layout`/`Paint`/`Input` via `Adapted<T>`), the scene paint walk
