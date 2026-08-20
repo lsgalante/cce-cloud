@@ -488,12 +488,19 @@ fn spawn_app(app: &AppInfo) {
 }
 
 /// Terminal used to host `Terminal=true` desktop entries: $TERMINAL if it
-/// resolves on PATH, else foot. Callers pass the command positionally
-/// (`term sh -c …`), not via `-e`, which foot does not accept.
+/// resolves on PATH (user env override), else the DE's configured default
+/// (config.kdl `default_terminal`, written by the settings app's Default
+/// Apps page), else foot. Callers pass the command positionally
+/// (`term sh -c …`), not via `-e` — the convention every candidate must
+/// accept (foot does natively; cce-terminal grew it alongside its entry).
 fn terminal_emulator() -> Option<String> {
     std::env::var("TERMINAL")
         .ok()
         .filter(|t| !t.is_empty() && command_in_path(t))
+        .or_else(|| {
+            cce_ui::config::get_string("/default_terminal")
+                .filter(|t| !t.is_empty() && command_in_path(t))
+        })
         .or_else(|| command_in_path("foot").then(|| "foot".to_string()))
 }
 
