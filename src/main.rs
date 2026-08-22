@@ -522,10 +522,14 @@ fn spawn_detached(program: &str, args: &[&str]) {
     use std::os::unix::process::CommandExt;
     let mut cmd = std::process::Command::new(program);
     cmd.args(args).process_group(0);
+    // Per-user runtime dir, not /tmp: this records every app the launcher
+    // starts and captures their stdout/stderr, so a fixed /tmp path is both a
+    // collision between users and a readable trace of one user's activity.
+    let log_path = cce_ui::config::cce_runtime_dir().join("spawn.log");
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open("/tmp/cce-spawn.log")
+        .open(&log_path)
     {
         let mut f = file;
         use std::io::Write;

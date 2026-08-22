@@ -68,7 +68,9 @@ needs-stdin decision, in `run_client()`).
 - `Path` — executables scanned from `$PATH`.
 - `Apps` — `.desktop` files from the standard application dirs, sorted by launch
   frecency persisted in `~/.cache/cce-cloud-apps.json`; selecting spawns the app's
-  `Exec` (spawn output logged to `/tmp/cce-spawn.log`). Each entry's `Icon=` is
+  `Exec` (spawn output logged to `$XDG_RUNTIME_DIR/cce/spawn.log`, via
+  `cce_ui::config::cce_runtime_dir()` — it was `/tmp/cce-spawn.log` before
+  2026-08-22). Each entry's `Icon=` is
   resolved through `cce_ui::icon` and drawn in a gutter left of the label — the
   gutter is applied to every row, so one unresolvable icon doesn't rag the text
   edge. This is the *only* mode with icons: Dmenu/Path items are arbitrary
