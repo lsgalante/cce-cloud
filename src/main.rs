@@ -1919,6 +1919,7 @@ impl PointerHandler for AppState {
                                 st.upload_vertices();
                                 self.redraw = true;
                             } else {
+                                let prev_selected = st.fuzzel.selected;
                                 let changed = {
                                     let ev = cce_ui::widget::Event::MouseButton {
                                         button: cce_ui::widget::MouseButton::Left,
@@ -1933,15 +1934,18 @@ impl PointerHandler for AppState {
                                     st.ui_context.propagate_event(&ev, root)
                                 };
                                 if changed {
-                                    // Any row press activates. This used to gate on
-                                    // `selected == prev_selected` outside Dmenu/switcher
-                                    // mode — click-to-select, click-AGAIN-to-launch — so a
-                                    // single click on an unselected app only moved the
-                                    // highlight, which reads as the click doing nothing.
-                                    // The fuzzel on_event already resolved the press to a
-                                    // really-drawn row (scrollbar and clipped-sliver
-                                    // presses never get here), so the click IS the choice.
-                                    {
+                                    // A single click launches — the fuzzel on_event only
+                                    // reports presses it resolved to a really-drawn row
+                                    // (scrollbar and clipped-sliver presses never get
+                                    // here), so the click IS the choice, exactly as Enter.
+                                    // (The old gate gated Apps/Path on `selected ==
+                                    // prev_selected`, which read as the click doing
+                                    // nothing.) The SWITCHER keeps two-click: its rows are
+                                    // live windows, and focusing one on a stray first
+                                    // click would be destructive — click to inspect the
+                                    // selection, click it again to commit.
+                                    let commit = !st.switcher_mode || st.fuzzel.selected == prev_selected;
+                                    if commit {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                             println!("{}", item);
                                             self.selected_item = Some(item.clone());
