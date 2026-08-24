@@ -536,7 +536,11 @@ fn spawn_detached(program: &str, args: &[&str]) {
         let _ = writeln!(f, "[spawn] executing: {} {}", program, args.join(" "));
         cmd.stdout(f.try_clone().unwrap()).stderr(f);
     }
-    cmd.spawn().ok();
+    // Through the toolkit's reaping spawn, NOT a bare `cmd.spawn()`: the daemon
+    // lives for the whole session, and a dropped Child handle means every app
+    // it ever launched sits in the process table as a zombie once it exits —
+    // unreadable in /proc and reported "alive" by kill(pid, 0) probes.
+    let _ = cce_ui::process::spawn_detached(cmd);
 }
 
 
