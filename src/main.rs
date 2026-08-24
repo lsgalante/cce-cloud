@@ -1919,7 +1919,6 @@ impl PointerHandler for AppState {
                                 st.upload_vertices();
                                 self.redraw = true;
                             } else {
-                                let prev_selected = st.fuzzel.selected;
                                 let changed = {
                                     let ev = cce_ui::widget::Event::MouseButton {
                                         button: cce_ui::widget::MouseButton::Left,
@@ -1934,7 +1933,15 @@ impl PointerHandler for AppState {
                                     st.ui_context.propagate_event(&ev, root)
                                 };
                                 if changed {
-                                    if st.fuzzel.selected == prev_selected || st.switcher_mode || st.mode == LauncherMode::Dmenu {
+                                    // Any row press activates. This used to gate on
+                                    // `selected == prev_selected` outside Dmenu/switcher
+                                    // mode — click-to-select, click-AGAIN-to-launch — so a
+                                    // single click on an unselected app only moved the
+                                    // highlight, which reads as the click doing nothing.
+                                    // The fuzzel on_event already resolved the press to a
+                                    // really-drawn row (scrollbar and clipped-sliver
+                                    // presses never get here), so the click IS the choice.
+                                    {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                             println!("{}", item);
                                             self.selected_item = Some(item.clone());
