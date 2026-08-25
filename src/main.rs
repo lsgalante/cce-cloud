@@ -956,7 +956,6 @@ struct State {
     /// children, no events.
     window_rect: (f32, f32, f32, f32),
     window_bg: [f32; 4],
-    window_radius: f32,
     select_and_close_requested: bool,
     /// `Some` for `-x/-y` popups (always layer-shell): re-applied on every resize so
     /// an auto-sizing window can't grow off the screen edge.
@@ -1253,7 +1252,6 @@ impl State {
         cce_ui::scale::set_app_id("cce-cloud".to_string());
         let bg_color = cce_ui::color::page_low_color();
         let window_rect = (0.0, 0.0, lw, lh);
-        let window_radius = cce_ui::color::root_plate_corner_radius();
 
         let mut state = Self {
             window: Some(window),
@@ -1297,7 +1295,6 @@ impl State {
             ui_context: cce_ui::context::UiContext::new(),
             window_rect,
             window_bg: bg_color,
-            window_radius,
             select_and_close_requested: false,
             placement,
         };
@@ -1486,14 +1483,23 @@ impl State {
             bg_color[3] = cce_ui::color::root_plate_opacity();
         }
         if bg_color[3] > 0.0 {
-            let r = if self.window_radius > 0.1 { self.window_radius } else { 0.0 };
+            // PlateSpec (cce-ui RFC 7b, closing 7b-2's cce-cloud question): the
+            // overlay SHARES the decorated-window silhouette. The compositor
+            // never clips layer surfaces (layer_shell.rs passes blur radius 0;
+            // corner rounding is the app's), so what this draws IS the
+            // silhouette — and a launcher-sized panel wearing the nominal
+            // widget-scale radius reads nearly square next to the windows
+            // around it. All four corners are window corners; the spec snaps
+            // them to the shared curve. Depth stays this app's shallower
+            // plate_bevel_width, not the window default.
             let (wx, wy, ww, wh) = self.window_rect;
-            pc.bevel(
-                Rect { x: wx, y: wy, width: ww, height: wh },
-                (r, r, r, r),
-                bg_color,
-                cce_ui::color::plate_bevel_width(),
-            );
+            pc.plate_spec(&cce_ui::scene::paint::PlateSpec {
+                rect: Rect { x: wx, y: wy, width: ww, height: wh },
+                color: bg_color,
+                blur: false,
+                window_corners: (true, true, true, true),
+                depth: cce_ui::color::plate_bevel_width(),
+            });
         }
 
         // 2. Child widgets, through the paint walk: bevel/recess prims reach the
