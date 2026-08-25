@@ -1253,7 +1253,7 @@ impl State {
         cce_ui::scale::set_app_id("cce-cloud".to_string());
         let bg_color = cce_ui::color::page_low_color();
         let window_rect = (0.0, 0.0, lw, lh);
-        let window_radius = cce_ui::color::backplate_corner_radius();
+        let window_radius = cce_ui::color::root_plate_corner_radius();
 
         let mut state = Self {
             window: Some(window),
@@ -1483,7 +1483,7 @@ impl State {
         // rim makes the popup read as a raised surface instead of a flat sheet.
         let mut bg_color = self.window_bg;
         if bg_color[3] > 0.001 {
-            bg_color[3] = cce_ui::color::active_backplate_opacity();
+            bg_color[3] = cce_ui::color::root_plate_opacity();
         }
         if bg_color[3] > 0.0 {
             let r = if self.window_radius > 0.1 { self.window_radius } else { 0.0 };
