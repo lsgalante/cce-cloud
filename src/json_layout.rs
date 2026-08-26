@@ -137,7 +137,7 @@ impl JsonLayoutWidget {
                             JsonControl::Checkbox(cb)
                         }
                         "button" => {
-                            JsonControl::Button(Button::new(0.0, 0.0, 0.0, 0.0)
+                            JsonControl::Button(Button::new_menu_item(0.0, 0.0, 0.0, 0.0)
                                 .with_label(&text)
                                 .with_justify(page_justify)
                                 .with_bg([0.0, 0.0, 0.0, 0.0])
@@ -209,7 +209,7 @@ impl JsonLayoutWidget {
                         JsonControl::Checkbox(cb)
                     }
                     "button" => {
-                        JsonControl::Button(Button::new(0.0, 0.0, 0.0, 0.0)
+                        JsonControl::Button(Button::new_menu_item(0.0, 0.0, 0.0, 0.0)
                             .with_label(&text)
                             .with_justify(global_justify)
                             .with_bg([0.0, 0.0, 0.0, 0.0])
@@ -285,11 +285,21 @@ impl JsonLayoutWidget {
         let mut page_current_y = vec![16.0; 16]; // support up to 16 pages
         let spacing = 12.0;
 
-        for w_state in &mut self.widgets {
-            let p_idx = w_state.page_idx;
+        for i in 0..self.widgets.len() {
+            let p_idx = self.widgets[i].page_idx;
             if p_idx >= page_current_y.len() {
                 continue;
             }
+            // Menu rows in one run share a single recess (see `paint`), so
+            // they butt together inside it; the spacing returns at the run's
+            // end, where the well ends too.
+            let run_continues = self.widgets[i].widget_type == "button"
+                && self
+                    .widgets
+                    .get(i + 1)
+                    .map(|n| n.page_idx == p_idx && n.widget_type == "button")
+                    .unwrap_or(false);
+            let w_state = &mut self.widgets[i];
             let current_y = &mut page_current_y[p_idx];
             w_state.x = bx + pad_x;
 
@@ -324,7 +334,7 @@ impl JsonLayoutWidget {
                 w_state.h = h;
             }
 
-            *current_y += w_state.h + spacing;
+            *current_y += w_state.h + if run_continues { 0.0 } else { spacing };
         }
 
         // Store total height of each page (adding a little padding at the end)
@@ -587,6 +597,47 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         let (bx, by, bw, bh) = self.rect();
         let pad_x = 16.0;
         let clip = Rect { x: bx + pad_x - 4.0, y: by, width: bw - (pad_x - 4.0), height: bh };
+
+        // One recess per run of adjacent menu rows, drawn BEFORE the rows so
+        // they sit inside it. A menu row draws no plate and no border of its
+        // own (ButtonKind::MenuItem) — the group is the carved thing, and the
+        // rows butt against each other within it, which is why the run's
+        // bounding box is a single continuous well rather than one per item.
+        let radius = cce_ui::layout::button_corner_radius();
+        let face = cce_ui::colors::button_background_color();
+        let mut i = 0;
+        while i < self.widgets.len() {
+            let w = &self.widgets[i];
+            if w.page_idx != self.active_page || w.widget_type != "button" {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            let mut end = i;
+            while let Some(n) = self.widgets.get(end + 1) {
+                if n.page_idx == self.active_page && n.widget_type == "button" {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            let (first, last) = (&self.widgets[start], &self.widgets[end]);
+            let run = Rect {
+                x: first.x,
+                y: first.y,
+                width: first.w,
+                height: last.y + last.h - first.y,
+            };
+            // Depth from ONE row's height, not the run's: the groove has to
+            // read the same as every other carved control in the DE, and a
+            // tall run would otherwise cut a far deeper channel.
+            let depth = cce_ui::layout::bevel_width().min(first.h * 0.2);
+            pc.clip(clip, |pc| {
+                pc.inset_plate(run, (radius, radius, radius, radius), face, depth);
+            });
+            i = end + 1;
+        }
+
         for w in &self.widgets {
             if w.page_idx != self.active_page {
                 continue;
