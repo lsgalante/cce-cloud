@@ -605,6 +605,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         // bounding box is a single continuous well rather than one per item.
         let radius = cce_ui::layout::button_corner_radius();
         let face = cce_ui::colors::button_background_color();
+        let mut seams: Vec<(Rect, f32)> = Vec::new();
         let mut i = 0;
         while i < self.widgets.len() {
             let w = &self.widgets[i];
@@ -635,6 +636,24 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
             pc.clip(clip, |pc| {
                 pc.inset_plate(run, (radius, radius, radius, radius), face, depth);
             });
+            // Seams are collected, not drawn yet: they are pure shading and
+            // must land ON TOP of the rows. A hovered row fills its whole
+            // rect, and the groove straddles the boundary between two rows —
+            // drawn underneath, the hover would erase half of each groove it
+            // touches.
+            //
+            // Half depth so the two walls MEET at the boundary rather than
+            // leaving flat floor between them: at full depth the seam reads as
+            // two separate hairlines ~9px apart instead of one groove, against
+            // the well's own ring which measures a 4px dark-to-light V.
+            let seam_d = depth * 0.5;
+            for k in start..end {
+                let seam = self.widgets[k].y + self.widgets[k].h;
+                seams.push((
+                    Rect { x: run.x, y: seam - seam_d, width: run.width, height: 2.0 * seam_d },
+                    seam_d,
+                ));
+            }
             i = end + 1;
         }
 
@@ -659,6 +678,13 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
                         pc.pop_clip_circle();
                     }
                 }
+            });
+        }
+        // Seam grooves last: pure shading, composed over the rows so a hovered
+        // row's fill cannot erase the grooves it straddles.
+        for (rect, seam_d) in seams {
+            pc.clip(clip, |pc| {
+                pc.recess_edges(rect, (0.0, 0.0, 0.0, 0.0), seam_d, (true, false, true, false));
             });
         }
         for (tl, bounds) in self.own_labels_with_bounds(&dummy) {
