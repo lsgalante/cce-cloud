@@ -475,6 +475,44 @@ fn spawn_command(cmd: &str) {
     spawn_detached("sh", &["-c", cmd]);
 }
 
+/// Resolve a cce binary installed beside this one.
+///
+/// The launcher runs as a systemd user service, whose PATH is
+/// `/usr/local/bin:/usr/bin` — `~/.local/bin`, where every cce binary lives,
+/// is not on it, so spawning one by bare name fails with ENOENT under systemd
+/// while working fine from a shell.
+fn de_bin(name: &str) -> std::path::PathBuf {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let beside = dir.join(name);
+            if beside.exists() {
+                return beside;
+            }
+        }
+    }
+    std::path::PathBuf::from(name)
+}
+
+/// Open the launched window at the grid square this launcher was invoked at,
+/// keeping its remembered size and growing away from its neighbours.
+///
+/// Only when there IS an invocation point: the desktop menu passes one
+/// through, a launcher summoned by keyboard does not, and in that case the app
+/// keeps its remembered place — there is no "here" to mean.
+fn place_next_at(exec: &str, invoked_at: Option<(i32, i32)>) {
+    let Some((x, y)) = invoked_at else { return };
+    let first = exec.split_whitespace().next().unwrap_or("");
+    let prog = first.rsplit('/').next().unwrap_or(first);
+    if prog.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new(de_bin("ccectl"))
+        .args(["place-next-cell", prog, &x.to_string(), &y.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 /// Launch an app entry; `Terminal=true` entries are hosted in a terminal
 /// emulator (entries are dropped at scan time when none is installed).
 fn spawn_app(app: &AppInfo) {
@@ -927,6 +965,12 @@ struct State {
     frame_images: Vec<ImageQuad>,
     plate_features: Vec<[f32; 12]>,
 
+    /// Where this popup was invoked, in layout px, when it was given a
+    /// position at all (the desktop menu passes its click through; a
+    /// keyboard-summoned launcher has no "here" to mean). Used to place the
+    /// launched window on that grid square.
+    invoked_at: Option<(i32, i32)>,
+
     fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
     json_layout: Option<cce_ui::widget::Adapted<JsonLayoutWidget>>,
     font_system: FontSystem,
@@ -1253,7 +1297,12 @@ impl State {
         let bg_color = cce_ui::color::page_low_color();
         let window_rect = (0.0, 0.0, lw, lh);
 
+        let invoked_at = match (x_pos, y_pos) {
+            (Some(x), Some(y)) => Some((x, y)),
+            _ => None,
+        };
         let mut state = Self {
+            invoked_at,
             window: Some(window),
             wl_surface,
             renderer: Some(renderer),
@@ -1679,10 +1728,12 @@ impl AppState {
                         LauncherMode::Apps => {
                             if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
                                 record_app_launch(&app.name);
+                                place_next_at(&app.exec, st.invoked_at);
                                 spawn_app(app);
                             }
                         }
                         LauncherMode::Path => {
+                            place_next_at(item, st.invoked_at);
                             spawn_command(item);
                         }
                         LauncherMode::Dmenu => {}
