@@ -15,6 +15,13 @@ KillMode=process
 Environment=RUST_LOG=info
 # App launches inherit this PATH; without %h/.local/bin, desktop entries
 # with bare Exec names fail to spawn.
+# LOAD-BEARING. A systemd user service inherits PATH=/usr/local/bin:/usr/bin,
+# and every cce binary is installed to ~/.local/bin. This daemon LAUNCHES
+# things — .desktop entries whose Exec= is a bare name by DE convention
+# (`Exec=cce-browser %u`), and the apps the launcher spawns inherit this
+# environment. Drop this line and every one of them fails with ENOENT, from a
+# launcher that looks like it did nothing. cce-grid had no equivalent, which
+# is exactly how its context menu shipped silently broken.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 
 [Install]
