@@ -12,8 +12,10 @@ shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that 
 
 Three source files, all logic in `src/main.rs` (~3.3k lines):
 
-- `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland +
-  wgpu stack, `FuzzelWidget` (the list UI), all input handling, app/PATH scanning.
+- `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland
+  surface and event loop, `FuzzelWidget` (the list UI), all input handling,
+  app/PATH scanning. (Rendering itself is cce-ui's — this crate declares no
+  graphics dependency of its own.)
 - `src/json_layout.rs` — `JsonLayoutWidget`: the JSON-config popup panel host
   (labels, checkboxes, buttons, spinboxes, color selectors, sliders, multi-page).
   App-owned copy of a dissolved cce-ui type; cloud is its only consumer.
@@ -113,7 +115,9 @@ widget code, but don't try to "port" this app onto the engine runner.
 Surface choice: an XDG toplevel flagged as popup via the cce window-management
 protocol when the compositor global is present and no `-x/-y` was given; otherwise a
 layer-shell **Overlay** surface with exclusive keyboard. The window continuously
-auto-sizes to its content (`update_desired_size`, measured via glyphon text buffers)
+auto-sizes to its content (`update_desired_size` — list rows measured with
+`cce_ui::cosmic_text` buffers, the JSON panel's widgets with
+`cce_ui::widget::display::measure_text`)
 and closes through a ~150ms fade-out (`trigger_close` → `fade_factor`).
 
 `-x/-y` is a *cursor* position (the compositor hands the raw pointer to the desktop
