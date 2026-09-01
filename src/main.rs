@@ -630,7 +630,11 @@ impl FuzzelWidget {
             selected: 0,
             icons: std::collections::HashMap::new(),
             icon_gutter: 0.0,
-            scroll_box: ScrollRegion::new(22.0, 0.0),
+            // Designer raise/sink treatment: the bar idles sunk under the
+            // list's translucent bg (dimly visible through it) and raises over
+            // the rows on scroll. The region already sits inset from the popup
+            // edge, so the stock 4px edge inset reads right here.
+            scroll_box: ScrollRegion::new(22.0, 0.0).with_sink_behind(true),
         })
     }
 
@@ -694,6 +698,7 @@ impl FuzzelWidget {
         }
 
         let virtual_selected_y = self.selected as f32 * item_h;
+        let old_scroll = self.scroll_box.scroll_y;
         if virtual_selected_y + item_h > self.scroll_box.scroll_y + viewport_h {
             self.scroll_box.scroll_y = virtual_selected_y + item_h - viewport_h;
         } else if virtual_selected_y < self.scroll_box.scroll_y {
@@ -702,6 +707,11 @@ impl FuzzelWidget {
 
         let max_scroll = (content_h - viewport_h).max(0.0);
         self.scroll_box.scroll_y = self.scroll_box.scroll_y.clamp(0.0, max_scroll);
+        // Keyboard navigation scrolls the list without touching the wheel
+        // path — raise the sink-behind bar for it too.
+        if (self.scroll_box.scroll_y - old_scroll).abs() > 0.01 {
+            self.scroll_box.notify_scrolled();
+        }
     }
 }
 
@@ -767,13 +777,15 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             if !self.filtered_items.is_empty() {
                 let virtual_selected_y = self.selected as f32 * item_h;
                 if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
-                    let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
                     // A raised beveled chip, not a flat tint: the selection reads
-                    // as sitting proud of the list the way focused panes do.
+                    // as sitting proud of the list the way focused panes do. No
+                    // width reserved for the scrollbar anymore — the sink-behind
+                    // bar idles under the list bg and rides OVER the rows while
+                    // raised, so the chip keeps its full width either way.
                     let sel = Rect {
                         x: self.x + pad + 2.0,
                         y: draw_y,
-                        width: self.w - pad * 2.0 - 4.0 - scrollbar_w,
+                        width: self.w - pad * 2.0 - 4.0,
                         height: item_h - 2.0,
                     };
                     let depth = cce_ui::color::plate_bevel_width().min(sel.height * 0.2);
@@ -799,6 +811,15 @@ impl cce_ui::widget::Paint for FuzzelWidget {
                 ctx.text(l.text, l.x, l.y, l.font_size, l.color);
             }
         });
+
+        // The raised scrollbar rides over the rows while a scroll holds it up
+        // (the sunk layer went under the list bg inside push_quads). The bar
+        // was previously never drawn at all — grabbable but invisible.
+        let mut bar = Vec::new();
+        self.scroll_box.push_scrollbar_quads(&mut bar);
+        for (qx, qy, qw, qh, qc) in bar {
+            ctx.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
+        }
 
         // Prompt/query line and the empty-state notice — outside the list clip.
         for l in self.own_labels() {
@@ -2791,6 +2812,11 @@ fn run_standalone() {
                     app.redraw = true;
                 }
             }
+            // Raise/sink upkeep for the list scrollbar (true while the
+            // post-scroll hold runs or on the depth flip).
+            if state.fuzzel.scroll_box.tick(dt) {
+                app.redraw = true;
+            }
         }
 
         if app.redraw {
@@ -3299,6 +3325,11 @@ fn run_daemon(socket_path: &str) {
                     if jl.tick(dt, &mut st.ui_context) {
                         app.redraw = true;
                     }
+                }
+                // Raise/sink upkeep for the list scrollbar (true while the
+                // post-scroll hold runs or on the depth flip).
+                if st.fuzzel.scroll_box.tick(dt) {
+                    app.redraw = true;
                 }
             }
 
