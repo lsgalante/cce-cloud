@@ -1,5 +1,4 @@
-mod scroll_region;
-use scroll_region::ScrollRegion;
+use cce_ui::widget::ScrollRegion;
 
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
@@ -123,15 +122,23 @@ fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buff
 /// A widget subtree's text via the paint walk (not the legacy text_labels getter),
 /// reduced to the plain labels this renderer shapes: the buffer font and window bounds
 /// stay exactly as before (make_text_buffer applies the control font to every label).
-fn walk_text_labels(ui: &cce_ui::context::UiContext, w: &dyn WidgetHost) -> Vec<TextLabel> {
+/// Each label rides with its merged clip bounds (logical `[l, t, r, b]`, from
+/// the paint walk's clip ∩ the prim's own bounds — `append_widget_text` merges
+/// them): prepare_text turns them into the span's physical clip so text cut by
+/// a clip (a partially visible list row) is cut at the glyph pass too, not
+/// drawn whole.
+fn walk_text_labels(
+    ui: &cce_ui::context::UiContext,
+    w: &dyn WidgetHost,
+) -> Vec<(TextLabel, Option<[f32; 4]>)> {
     let mut pc = cce_ui::scene::paint::PaintCtx::new();
     cce_ui::scene::painter::append_widget_text(ui, w, &mut pc);
     pc.finish()
         .items
         .into_iter()
         .filter_map(|item| match item.prim {
-            cce_ui::scene::paint::Prim::Text { text, x, y, font_size, color, .. } => {
-                Some(TextLabel { text, x, y, font_size, color })
+            cce_ui::scene::paint::Prim::Text { text, x, y, font_size, color, bounds, .. } => {
+                Some((TextLabel { text, x, y, font_size, color }, bounds))
             }
             _ => None,
         })
@@ -743,38 +750,57 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             ctx.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
         }
 
-        // Selected Item Highlight
-        let item_h = 25.0;
-        if !self.filtered_items.is_empty() {
-            let virtual_selected_y = self.selected as f32 * item_h;
-            if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
-                let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
-                // A raised beveled chip, not a flat tint: the selection reads
-                // as sitting proud of the list the way focused panes do.
-                let sel = Rect {
-                    x: self.x + pad + 2.0,
-                    y: draw_y,
-                    width: self.w - pad * 2.0 - 4.0 - scrollbar_w,
-                    height: item_h - 2.0,
-                };
-                let depth = cce_ui::color::plate_bevel_width().min(sel.height * 0.2);
-                ctx.bevel(sel, (4.0, 4.0, 4.0, 4.0), [0.20, 0.35, 0.65, 0.9], depth);
-            }
-        }
-
-        // App icons, on the same virtualization predicate as the labels below:
-        // only rows `get_draw_y` places inside the viewport are emitted, so a
-        // 300-app list still costs one image quad per visible row.
-        if self.icon_gutter > 0.0 {
-            for (idx, item_text) in self.filtered_items.iter().enumerate() {
-                let Some((image, iw, ih)) = self.icons.get(item_text).copied() else { continue };
-                if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
-                    ctx.image(image, self.icon_rect(draw_y, item_h, iw, ih), 1.0);
+        // The list content — selection chip, icons, row labels — under the
+        // list-viewport clip: `get_draw_y` returns PARTIALLY visible rows (the
+        // toolkit ScrollRegion's intersection contract), so an edge row
+        // renders cut by the clip instead of vanishing. Row text carries the
+        // clip as bounds through walk_text_labels → prepare_text.
+        let viewport = Rect {
+            x: self.scroll_box.x,
+            y: self.scroll_box.viewport_y,
+            width: self.scroll_box.w,
+            height: self.scroll_box.viewport_h,
+        };
+        ctx.clip(viewport, |ctx| {
+            // Selected Item Highlight
+            let item_h = 25.0;
+            if !self.filtered_items.is_empty() {
+                let virtual_selected_y = self.selected as f32 * item_h;
+                if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
+                    let scrollbar_w = if self.scroll_box.content_h > self.scroll_box.viewport_h { 10.0 } else { 0.0 };
+                    // A raised beveled chip, not a flat tint: the selection reads
+                    // as sitting proud of the list the way focused panes do.
+                    let sel = Rect {
+                        x: self.x + pad + 2.0,
+                        y: draw_y,
+                        width: self.w - pad * 2.0 - 4.0 - scrollbar_w,
+                        height: item_h - 2.0,
+                    };
+                    let depth = cce_ui::color::plate_bevel_width().min(sel.height * 0.2);
+                    ctx.bevel(sel, (4.0, 4.0, 4.0, 4.0), [0.20, 0.35, 0.65, 0.9], depth);
                 }
             }
-        }
 
-        // Own labels: prompt/query line, visible items, empty-state notice.
+            // App icons, on the same virtualization predicate as the labels:
+            // only rows `get_draw_y` places in the viewport are emitted, so a
+            // 300-app list still costs one image quad per visible row.
+            if self.icon_gutter > 0.0 {
+                let item_h = 25.0;
+                for (idx, item_text) in self.filtered_items.iter().enumerate() {
+                    let Some((image, iw, ih)) = self.icons.get(item_text).copied() else { continue };
+                    if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
+                        ctx.image(image, self.icon_rect(draw_y, item_h, iw, ih), 1.0);
+                    }
+                }
+            }
+
+            // Visible item labels.
+            for l in self.row_labels() {
+                ctx.text(l.text, l.x, l.y, l.font_size, l.color);
+            }
+        });
+
+        // Prompt/query line and the empty-state notice — outside the list clip.
         for l in self.own_labels() {
             ctx.text(l.text, l.x, l.y, l.font_size, l.color);
         }
@@ -794,9 +820,11 @@ impl cce_ui::widget::Input for FuzzelWidget {
             let item_h = 25.0;
             // `hit()` spans the whole region, scrollbar strip included, and the row math
             // below accepts any y inside it — so without these two gates a press on the
-            // scrollbar, or on the partially-clipped sliver at the viewport edge, resolved
-            // to a row. In Dmenu/switcher mode a press commits and closes, so that emitted
-            // an item the user never clicked (and, on the sliver, never even saw).
+            // scrollbar resolved to a row. In Dmenu/switcher mode a press commits and
+            // closes, so that emitted an item the user never clicked. The `get_draw_y`
+            // gate keeps click and paint on the SAME predicate: it now returns partially
+            // visible rows too (drawn cut by the viewport clip), so a press on an edge
+            // sliver selects the row the user can see — visible ⇒ clickable, culled ⇒ not.
             if self.scroll_box.hit(*px, *py) && !self.scroll_box.hit_scrollbar(*px, *py) {
                 let click_virtual_y = *py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
                 let clicked_idx = (click_virtual_y / item_h).floor() as usize;
@@ -1594,7 +1622,7 @@ impl State {
     fn prepare_text(&mut self) {
         let scale_f32 = self.scale as f32;
 
-        let mut widget_labels: Vec<TextLabel> = Vec::new();
+        let mut widget_labels: Vec<(TextLabel, Option<[f32; 4]>)> = Vec::new();
         if self.mode == LauncherMode::Json {
             if let Some(jl) = &self.json_layout {
                 widget_labels.extend(walk_text_labels(&self.ui_context, jl));
@@ -1604,7 +1632,7 @@ impl State {
         }
 
         let mut buffers: Vec<Buffer> = Vec::with_capacity(widget_labels.len());
-        for label in &widget_labels {
+        for (label, _) in &widget_labels {
             buffers.push(make_text_buffer(&mut self.font_system, &label.text, label.font_size));
         }
 
@@ -1612,13 +1640,22 @@ impl State {
         let spans: Vec<TextSpan> = buffers
             .iter()
             .zip(widget_labels.iter())
-            .map(|(buf, label)| TextSpan {
+            .map(|(buf, (label, bounds))| TextSpan {
                 buffer: buf,
                 left: (label.x * scale_f32).round(),
                 top: (label.y * scale_f32).round(),
                 // Buffers are shaped at logical size; the span scales to physical.
                 scale: scale_f32,
-                bounds: None,
+                // Logical merged clip (walk clip ∩ prim bounds) → physical px,
+                // so a partially visible row's text is cut at the viewport.
+                bounds: bounds.map(|b| {
+                    [
+                        (b[0] * scale_f32).floor() as i32,
+                        (b[1] * scale_f32).floor() as i32,
+                        (b[2] * scale_f32).ceil() as i32,
+                        (b[3] * scale_f32).ceil() as i32,
+                    ]
+                }),
                 default_color: [
                     label.color[0] as f32 / 255.0,
                     label.color[1] as f32 / 255.0,
@@ -3930,7 +3967,27 @@ impl FuzzelWidget {
             color: query_color,
         });
 
+        if self.filtered_items.is_empty() {
+            let list_y = self.y + pad + search_h + 10.0;
+            labels.push(TextLabel {
+                text: "No matches found".to_string(),
+                x: self.x + pad + 10.0,
+                y: list_y + 4.0,
+                font_size: 13.0,
+                color: [0x88, 0x88, 0x99],
+            });
+        }
+
+        labels
+    }
+
+    /// Visible item labels — one per row `get_draw_y` places in (or partially
+    /// in) the viewport. Emitted under the paint walk's list clip, separately
+    /// from [`Self::own_labels`], which draws chrome outside it.
+    fn row_labels(&self) -> Vec<TextLabel> {
+        let pad = 15.0;
         let item_h = 25.0;
+        let mut labels = Vec::new();
         for (idx, item_text) in self.filtered_items.iter().enumerate() {
             let virtual_y = idx as f32 * item_h;
             if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_y, item_h) {
@@ -3951,18 +4008,6 @@ impl FuzzelWidget {
                 });
             }
         }
-
-        if self.filtered_items.is_empty() {
-            let list_y = self.y + pad + search_h + 10.0;
-            labels.push(TextLabel {
-                text: "No matches found".to_string(),
-                x: self.x + pad + 10.0,
-                y: list_y + 4.0,
-                font_size: 13.0,
-                color: [0x88, 0x88, 0x99],
-            });
-        }
-
         labels
     }
 }
