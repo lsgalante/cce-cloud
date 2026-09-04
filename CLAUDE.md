@@ -10,16 +10,23 @@ JSON-defined popup panel — all in one binary. It is one crate of the cce multi
 workspace; workspace-wide conventions (multi-repo layout, no `[workspace.dependencies]`,
 shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that too.
 
-Three source files, all logic in `src/main.rs` (~3.3k lines):
+Two source files, all logic in `src/main.rs` (~4.2k lines):
 
 - `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland
-  surface and event loop, `FuzzelWidget` (the list UI), all input handling,
+  surface and event loop, `FuzzelWidget` (the list UI: keyboard selection chip,
+  pointer hover wash, icons, row labels — hover and click share one `row_at`
+  predicate, so the lit row is the row a press picks), all input handling,
   app/PATH scanning. (Rendering itself is cce-ui's — this crate declares no
   graphics dependency of its own.)
 - `src/json_layout.rs` — `JsonLayoutWidget`: the JSON-config popup panel host
   (labels, checkboxes, buttons, spinboxes, color selectors, sliders, multi-page).
   App-owned copy of a dissolved cce-ui type; cloud is its only consumer.
-- `src/scroll_region.rs` — `ScrollRegion`: scrollbar/viewport math for the item list.
+
+The list's scrollbar/viewport math is the toolkit's `cce_ui::widget::ScrollRegion`
+(`cce-ui/src/widget/scroll_region.rs`). This crate carried its own copy in
+`src/scroll_region.rs` until 74f9ad4 (2026-09-01); the shared one is what gives
+`get_draw_y` its partially-visible-rows contract, which paint, click and hover all
+virtualize on.
 
 ## Build, test, run
 
@@ -44,7 +51,7 @@ cce-cloud --daemon                       # run the daemon (normally started by t
 
 ### Daemon / client / standalone
 
-`main()` picks one of three roles (`src/main.rs:3021`):
+`main()` (bottom of `src/main.rs`) picks one of three roles:
 
 - `--daemon`: `run_daemon()` binds `/run/user/$UID/cce-cloud.socket` (fallback
   `/tmp/cce-cloud-$UID.socket`), holds one long-lived Wayland connection, and serves
