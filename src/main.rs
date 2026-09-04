@@ -609,6 +609,14 @@ pub struct FuzzelWidget {
     /// every row, not just the ones that resolved, so a list with one missing
     /// icon keeps a straight text edge instead of ragging in and out.
     icon_gutter: f32,
+    /// Row under the pointer, by filtered index — the hover wash and the
+    /// brighter label. Distinct from `selected`: hovering never moves the
+    /// keyboard selection, only a click does.
+    hovered: Option<usize>,
+    /// Last pointer position seen over the surface, so the hovered row can be
+    /// re-derived when the rows move under a STATIONARY pointer — a wheel
+    /// glide, a keystroke refiltering the list, a keyboard snap.
+    cursor: Option<(f32, f32)>,
     pub scroll_box: ScrollRegion,
 }
 
@@ -630,6 +638,8 @@ impl FuzzelWidget {
             selected: 0,
             icons: std::collections::HashMap::new(),
             icon_gutter: 0.0,
+            hovered: None,
+            cursor: None,
             // Designer raise/sink treatment: the bar idles sunk under the
             // list's translucent bg (dimly visible through it) and raises over
             // the rows on scroll. The region already sits inset from the popup
@@ -684,6 +694,50 @@ impl FuzzelWidget {
         let viewport_h = self.h - (pad + search_h + 10.0) - pad;
         let content_h = self.filtered_items.len() as f32 * item_h;
         self.scroll_box.update_bounds_raw(content_h, viewport_y, viewport_h);
+        self.refresh_hover();
+    }
+
+    /// Filtered index of the row drawn at `(px, py)` — the ONE predicate the
+    /// click and the hover share, so what lights up is what a press picks:
+    /// inside the list, off the scrollbar strip (`hit()` spans it, and a
+    /// press there once resolved to a row and committed it in dmenu mode),
+    /// and a row `get_draw_y` places in the viewport — partially visible
+    /// rows included, drawn cut by the clip, so an edge sliver counts.
+    fn row_at(&self, px: f32, py: f32) -> Option<usize> {
+        let item_h = 25.0;
+        if !self.scroll_box.hit(px, py) || self.scroll_box.hit_scrollbar(px, py) {
+            return None;
+        }
+        let virtual_y = py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
+        if virtual_y < 0.0 {
+            return None;
+        }
+        let idx = (virtual_y / item_h).floor() as usize;
+        (idx < self.filtered_items.len()
+            && self.scroll_box.get_draw_y(idx as f32 * item_h, item_h).is_some())
+            .then_some(idx)
+    }
+
+    /// The pointer moved to `(px, py)`; true when the hovered row changed.
+    pub fn hover_at(&mut self, px: f32, py: f32) -> bool {
+        self.cursor = Some((px, py));
+        self.refresh_hover()
+    }
+
+    /// The pointer left the surface; true when a row was lit.
+    pub fn clear_hover(&mut self) -> bool {
+        self.cursor = None;
+        self.refresh_hover()
+    }
+
+    /// Re-derive the hovered row from the last pointer position — the rows
+    /// move under a stationary pointer on every scroll and refilter. True on
+    /// change, so callers can skip the re-upload when nothing moved.
+    pub fn refresh_hover(&mut self) -> bool {
+        let now = self.cursor.and_then(|(px, py)| self.row_at(px, py));
+        let changed = now != self.hovered;
+        self.hovered = now;
+        changed
     }
 
     pub fn snap_to_selected(&mut self) {
@@ -712,6 +766,7 @@ impl FuzzelWidget {
         if (self.scroll_box.scroll_y - old_scroll).abs() > 0.01 {
             self.scroll_box.notify_scrolled();
         }
+        self.refresh_hover();
     }
 }
 
@@ -793,6 +848,23 @@ impl cce_ui::widget::Paint for FuzzelWidget {
                 }
             }
 
+            // Hover wash — a flat, translucent pass of the selection colour
+            // on the chip's footprint under the pointer. Flat on purpose: the
+            // bevelled chip says "this is what Enter picks", the wash only
+            // "this is what a click would pick". Never on the selected row,
+            // which already wears the chip.
+            if let Some(idx) = self.hovered.filter(|&i| i != self.selected) {
+                if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
+                    let hov = Rect {
+                        x: self.x + pad + 2.0,
+                        y: draw_y,
+                        width: self.w - pad * 2.0 - 4.0,
+                        height: item_h - 2.0,
+                    };
+                    ctx.quad(hov, [0.20, 0.35, 0.65, 0.35]);
+                }
+            }
+
             // App icons, on the same virtualization predicate as the labels:
             // only rows `get_draw_y` places in the viewport are emitted, so a
             // 300-app list still costs one image quad per visible row.
@@ -838,28 +910,12 @@ impl cce_ui::widget::Input for FuzzelWidget {
             ..
         } = event
         {
-            let item_h = 25.0;
-            // `hit()` spans the whole region, scrollbar strip included, and the row math
-            // below accepts any y inside it — so without these two gates a press on the
-            // scrollbar resolved to a row. In Dmenu/switcher mode a press commits and
-            // closes, so that emitted an item the user never clicked. The `get_draw_y`
-            // gate keeps click and paint on the SAME predicate: it now returns partially
-            // visible rows too (drawn cut by the viewport clip), so a press on an edge
-            // sliver selects the row the user can see — visible ⇒ clickable, culled ⇒ not.
-            if self.scroll_box.hit(*px, *py) && !self.scroll_box.hit_scrollbar(*px, *py) {
-                let click_virtual_y = *py - self.scroll_box.viewport_y + self.scroll_box.scroll_y;
-                let clicked_idx = (click_virtual_y / item_h).floor() as usize;
-                // Same predicate the paint loop virtualizes on, so only a row actually
-                // drawn this frame is selectable.
-                if clicked_idx < self.filtered_items.len()
-                    && self
-                        .scroll_box
-                        .get_draw_y(clicked_idx as f32 * item_h, item_h)
-                        .is_some()
-                {
-                    self.selected = clicked_idx;
-                    return true;
-                }
+            // `row_at` is the same predicate the hover and the paint loop use
+            // (visible ⇒ clickable, culled ⇒ not), so a press picks the row
+            // that is lit under the pointer.
+            if let Some(idx) = self.row_at(*px, *py) {
+                self.selected = idx;
+                return true;
             }
         }
         false
@@ -1991,10 +2047,34 @@ impl PointerHandler for AppState {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
-                        } else if st.fuzzel.scroll_box.cursor_moved(cx, cy) {
+                        } else {
                             // Returns true only while a thumb drag is live; it also keeps
-                            // `hovered` current for the wheel/keyboard scope either way.
-                            st.fuzzel.update_scroll();
+                            // the region's `hovered` current for the wheel/keyboard scope
+                            // either way. A drag moves the rows under the pointer, so the
+                            // hover row is re-derived after it (update_scroll does that).
+                            let dragged = st.fuzzel.scroll_box.cursor_moved(cx, cy);
+                            if dragged {
+                                st.fuzzel.update_scroll();
+                            }
+                            if st.fuzzel.hover_at(cx, cy) || dragged {
+                                st.upload_vertices();
+                                self.redraw = true;
+                            }
+                        }
+                    }
+                    // The entry into the surface arrives as Enter with the
+                    // position, not as a Motion — a pointer that crosses onto
+                    // the list from outside lands ON a row and must light it.
+                    PointerEventKind::Enter { .. } => {
+                        st.cursor_x = cx;
+                        st.cursor_y = cy;
+                        if st.mode != LauncherMode::Json && st.fuzzel.hover_at(cx, cy) {
+                            st.upload_vertices();
+                            self.redraw = true;
+                        }
+                    }
+                    PointerEventKind::Leave { .. } => {
+                        if st.mode != LauncherMode::Json && st.fuzzel.clear_hover() {
                             st.upload_vertices();
                             self.redraw = true;
                         }
@@ -2867,6 +2947,11 @@ fn run_standalone() {
             if state.fuzzel.scroll_box.tick(dt) {
                 app.redraw = true;
             }
+            // A wheel glide moves the rows under a stationary pointer.
+            if state.fuzzel.refresh_hover() {
+                state.upload_vertices();
+                app.redraw = true;
+            }
         }
 
         if app.redraw {
@@ -3379,6 +3464,11 @@ fn run_daemon(socket_path: &str) {
                 // Raise/sink upkeep for the list scrollbar (true while the
                 // post-scroll hold runs or on the depth flip).
                 if st.fuzzel.scroll_box.tick(dt) {
+                    app.redraw = true;
+                }
+                // A wheel glide moves the rows under a stationary pointer.
+                if st.fuzzel.refresh_hover() {
+                    st.upload_vertices();
                     app.redraw = true;
                 }
             }
@@ -4074,6 +4164,9 @@ impl FuzzelWidget {
             if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_y, item_h) {
                 let color = if idx == self.selected {
                     [0xff, 0xff, 0xff]
+                } else if self.hovered == Some(idx) {
+                    // A step toward the selected white, over the hover wash.
+                    [0xe6, 0xe6, 0xee]
                 } else {
                     [0xbb, 0xbb, 0xc5]
                 };
