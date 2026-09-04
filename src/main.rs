@@ -2156,11 +2156,61 @@ impl PointerHandler for AppState {
                             }
                         }
                     }
-                    PointerEventKind::Axis { horizontal, vertical, .. } => {
-                        let h_scroll = horizontal.absolute as f32;
-                        let v_scroll = vertical.absolute as f32;
-                        let delta = cce_ui::widget::MouseScrollDelta::LineDelta(-h_scroll / 10.0, -v_scroll / 10.0);
-                        if st.fuzzel.scroll_box.wheel(&delta, st.cursor_x, st.cursor_y) {
+                    PointerEventKind::Axis { horizontal, vertical, source, .. } => {
+                        // Synthesized the way cce-ui's runner does it
+                        // (window_runner.rs, `axis_stop`): discrete steps are
+                        // wheel notches (LineDelta), anything else is pixels
+                        // 1:1 (PixelDelta), and a bare stop is the finger
+                        // lift. The phase is published before the dispatch so
+                        // the ScrollMotion under each scroll host knows whether
+                        // to glide a notch, track a finger, or fling.
+                        use cce_ui::widget::scroll_motion::{set_scroll_phase, ScrollPhase};
+                        let factors = cce_ui::input::scroll_factors();
+                        let discrete = horizontal.discrete != 0 || vertical.discrete != 0;
+                        let no_delta = !discrete && horizontal.absolute == 0.0 && vertical.absolute == 0.0;
+                        let stop = horizontal.stop || vertical.stop;
+                        let phase = if stop && no_delta {
+                            ScrollPhase::FingerEnd
+                        } else if !discrete
+                            && matches!(
+                                source,
+                                None | Some(wl_pointer::AxisSource::Finger) | Some(wl_pointer::AxisSource::Continuous)
+                            )
+                        {
+                            ScrollPhase::Finger
+                        } else {
+                            ScrollPhase::Wheel
+                        };
+                        set_scroll_phase(phase);
+                        let delta = if discrete {
+                            let h = if horizontal.discrete != 0 { horizontal.discrete as f32 } else { horizontal.absolute as f32 / 10.0 };
+                            let v = if vertical.discrete != 0 { vertical.discrete as f32 } else { vertical.absolute as f32 / 10.0 };
+                            cce_ui::widget::MouseScrollDelta::LineDelta(-h * factors.mouse as f32, -v * factors.mouse as f32)
+                        } else {
+                            cce_ui::widget::MouseScrollDelta::PixelDelta(cce_ui::widget::Position {
+                                x: -horizontal.absolute * factors.trackpad,
+                                y: -vertical.absolute * factors.trackpad,
+                            })
+                        };
+                        if st.mode == LauncherMode::Json {
+                            // The JSON layout's page scroll never received the
+                            // wheel (only the fuzzel list did, and it is not the
+                            // surface shown in this mode): route it the way the
+                            // PointerMove above is routed.
+                            let mut changed = false;
+                            if let Some(jl) = &mut st.json_layout {
+                                let ev = cce_ui::widget::Event::MouseWheel { delta, x: cx, y: cy, local_x: cx, local_y: cy };
+                                let root = jl.id();
+                                st.ui_context.register_widget(root, jl.as_ptr_mut());
+                                if st.ui_context.propagate_event(&ev, root) {
+                                    changed = true;
+                                }
+                            }
+                            if changed {
+                                st.upload_vertices();
+                                self.redraw = true;
+                            }
+                        } else if st.fuzzel.scroll_box.wheel(&delta, st.cursor_x, st.cursor_y) {
                             st.fuzzel.update_scroll();
                             st.upload_vertices();
                             self.redraw = true;
@@ -3899,9 +3949,9 @@ mod tests {
         std::env::set_var("XDG_CACHE_HOME", &temp_dir);
 
         let mut apps = vec![
-            AppInfo { name: "App A".to_string(), exec: "exec_a".to_string(), terminal: false },
-            AppInfo { name: "App B".to_string(), exec: "exec_b".to_string(), terminal: false },
-            AppInfo { name: "App C".to_string(), exec: "exec_c".to_string(), terminal: false },
+            AppInfo { name: "App A".to_string(), exec: "exec_a".to_string(), terminal: false, icon: None },
+            AppInfo { name: "App B".to_string(), exec: "exec_b".to_string(), terminal: false, icon: None },
+            AppInfo { name: "App C".to_string(), exec: "exec_c".to_string(), terminal: false, icon: None },
         ];
 
         // Initially no history, sorted alphabetically.

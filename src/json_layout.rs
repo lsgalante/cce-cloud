@@ -4,6 +4,7 @@
 //! walk reaches it as the adapter, whose subtree text pass-through forwards `paint`'s
 //! prims verbatim. `Justification` stayed in cce-ui (Button, cce-files, settings).
 
+use cce_ui::widget::scroll_motion::{scroll_settings, Bounds, ScrollMotion, LINE_PX};
 use cce_ui::widget::{
     WidgetHost, Widget, Checkbox, Button, Label, Spinbox, ColorSelector, TextLabel, MouseButton, ElementState, Slider, Event, UiContext,
     Key, NamedKey, Justification,
@@ -109,7 +110,12 @@ pub struct JsonLayoutWidget {
     base: Widget,
     pub widgets: Vec<JsonWidget>,
     pub dragging_slider_idx: Option<usize>,
+    /// Per-page DRAWN scroll offset; `page_scroll` drives it.
     pub page_scroll_y: Vec<f32>,
+    /// Per-page scroll motion: wheel notches glide, fingers track 1:1 and
+    /// fling on the lift, keyboard pages glide. `tick_scroll` carries the
+    /// drawn offset after it each frame.
+    pub page_scroll: Vec<ScrollMotion>,
     pub page_total_heights: Vec<f32>,
     pub active_page: usize,
 }
@@ -271,6 +277,7 @@ impl JsonLayoutWidget {
             widgets,
             dragging_slider_idx: None,
             page_scroll_y: vec![0.0; 16],
+            page_scroll: vec![ScrollMotion::new(); 16],
             page_total_heights: vec![0.0; 16],
             active_page: 0,
         })
@@ -352,9 +359,47 @@ impl JsonLayoutWidget {
         (self.base.x, self.base.y, self.base.w, self.base.h)
     }
 
+    /// The active page's wheel range: `0..=overflow`.
+    fn page_scroll_bounds(&self, page: usize) -> Bounds {
+        let (_, _, _, bh) = self.rect();
+        let total = self.page_total_heights.get(page).copied().unwrap_or(0.0);
+        Bounds::max(total - bh)
+    }
+
+    /// Copy a page's motion position into its drawn offset; true if it moved
+    /// (the caller re-lays the children out).
+    fn sync_page_scroll(&mut self, page: usize) -> bool {
+        let pos = self.page_scroll[page].y.pos();
+        let moved = (pos - self.page_scroll_y[page]).abs() > 1e-4;
+        self.page_scroll_y[page] = pos;
+        moved
+    }
+
+    /// Per-frame glide/coast of the active page's scroll. Reached from
+    /// `tick_children`, which the main loop calls (through `Adapted::tick`)
+    /// beside the launcher list's own `ScrollRegion::tick`. True while the
+    /// offset is still moving, so the demand-driven frame loop keeps drawing.
+    fn tick_scroll(&mut self, dt: f32) -> bool {
+        let page = self.active_page;
+        if page >= self.page_scroll.len() || page >= self.page_scroll_y.len() {
+            return false;
+        }
+        let host = self.page_scroll_y[page];
+        self.page_scroll[page].reconcile(0.0, host);
+        if !self.page_scroll[page].is_animating() {
+            return false;
+        }
+        let by = self.page_scroll_bounds(page);
+        let moved = self.page_scroll[page].tick(dt, Bounds::max(0.0), by);
+        if self.sync_page_scroll(page) {
+            self.layout_children();
+        }
+        moved || self.page_scroll[page].is_animating()
+    }
+
     /// Per-frame child state (the old `WidgetHost::tick` override): active-page widgets only.
     fn tick_children(&mut self, dt: f32, ctx: &mut UiContext) -> bool {
-        let mut changed = false;
+        let mut changed = self.tick_scroll(dt);
         let active_page = self.active_page;
         for w in &mut self.widgets {
             if w.page_idx != active_page {
@@ -487,15 +532,17 @@ impl JsonLayoutWidget {
                     let visible_h = bh;
                     let max_scroll_y = (total_height - visible_h).max(0.0);
                     if max_scroll_y > 0.0 {
-                        let scroll_amount = match delta {
-                            cce_ui::widget::MouseScrollDelta::LineDelta(_x, y) => -*y * 24.0,
-                            cce_ui::widget::MouseScrollDelta::PixelDelta(pos) => -pos.y as f32,
-                        };
-                        let old_scroll = self.page_scroll_y[active_page];
-                        self.page_scroll_y[active_page] = (old_scroll + scroll_amount).clamp(0.0, max_scroll_y);
-                        if (self.page_scroll_y[active_page] - old_scroll).abs() > 0.01 {
-                            self.layout_children();
+                        // A notch is LINE_PX, pixels are 1:1; the motion
+                        // glides or tracks and `tick_scroll` carries the drawn
+                        // offset after it. A true return is the repaint signal
+                        // (the target moved even if the offset has not yet).
+                        let motion = &mut self.page_scroll[active_page];
+                        motion.reconcile(0.0, self.page_scroll_y[active_page]);
+                        if motion.apply(delta, (LINE_PX, LINE_PX), Bounds::max(0.0), Bounds::max(max_scroll_y)) {
                             changed = true;
+                        }
+                        if self.sync_page_scroll(active_page) {
+                            self.layout_children();
                         }
                     }
                 }
@@ -505,35 +552,30 @@ impl JsonLayoutWidget {
         if let Event::KeyInput(key_event) = event {
             if key_event.state == ElementState::Pressed {
                 if active_page < self.page_total_heights.len() {
-                    let total_height = self.page_total_heights[active_page];
                     let (_, _, _, bh) = self.rect();
-                    let max_scroll_y = (total_height - bh).max(0.0);
-                    if max_scroll_y > 0.0 {
-                        let old_scroll = self.page_scroll_y[active_page];
-                        match &key_event.logical_key {
-                            Key::Named(NamedKey::PageDown) => {
-                                self.page_scroll_y[active_page] = (old_scroll + bh).clamp(0.0, max_scroll_y);
-                            }
-                            Key::Named(NamedKey::PageUp) => {
-                                self.page_scroll_y[active_page] = (old_scroll - bh).clamp(0.0, max_scroll_y);
-                            }
-                            Key::Named(NamedKey::Home) => {
-                                self.page_scroll_y[active_page] = 0.0;
-                            }
-                            Key::Named(NamedKey::End) => {
-                                self.page_scroll_y[active_page] = max_scroll_y;
-                            }
-                            Key::Named(NamedKey::ArrowDown) => {
-                                self.page_scroll_y[active_page] = (old_scroll + 24.0).clamp(0.0, max_scroll_y);
-                            }
-                            Key::Named(NamedKey::ArrowUp) => {
-                                self.page_scroll_y[active_page] = (old_scroll - 24.0).clamp(0.0, max_scroll_y);
-                            }
-                            _ => {}
-                        }
-                        if (self.page_scroll_y[active_page] - old_scroll).abs() > 0.01 {
-                            self.layout_children();
+                    let by = self.page_scroll_bounds(active_page);
+                    if by.hi > 0.0 {
+                        // Pages and Home/End glide to their target; the arrows
+                        // step a line and accumulate like wheel notches (the
+                        // toolkit ScrollRegion's keyboard contract).
+                        let s = scroll_settings();
+                        let motion = &mut self.page_scroll[active_page];
+                        motion.reconcile(0.0, self.page_scroll_y[active_page]);
+                        let target = motion.y.target();
+                        let moved = match &key_event.logical_key {
+                            Key::Named(NamedKey::PageDown) => motion.y.scroll_to(target + bh, by, &s),
+                            Key::Named(NamedKey::PageUp) => motion.y.scroll_to(target - bh, by, &s),
+                            Key::Named(NamedKey::Home) => motion.y.scroll_to(0.0, by, &s),
+                            Key::Named(NamedKey::End) => motion.y.scroll_to(by.hi, by, &s),
+                            Key::Named(NamedKey::ArrowDown) => motion.y.wheel(LINE_PX, by, &s),
+                            Key::Named(NamedKey::ArrowUp) => motion.y.wheel(-LINE_PX, by, &s),
+                            _ => false,
+                        };
+                        if moved {
                             changed = true;
+                        }
+                        if self.sync_page_scroll(active_page) {
+                            self.layout_children();
                         }
                     }
                 }
