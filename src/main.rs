@@ -1100,8 +1100,8 @@ struct State {
     switcher_mode: bool,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
-    /// Dissolved root Backplate (Phase 6as): the plate was a pure value-holder for the
-    /// window background — color (at backplate opacity), radius, rect. No border, no
+    /// Dissolved root plate container (Phase 6as): the plate was a pure value-holder for the
+    /// window background — color (at root plate opacity), radius, rect. No border, no
     /// children, no events.
     window_rect: (f32, f32, f32, f32),
     window_bg: [f32; 4],
@@ -1629,8 +1629,8 @@ impl State {
         use cce_ui::scene::layout::Rect;
         let mut pc = cce_ui::scene::paint::PaintCtx::new();
 
-        // 1. Window background — the dissolved Backplate's emission (base color at
-        // the configured backplate opacity), now as a beveled plate: the rolled
+        // 1. Window background — the dissolved root plate container's emission (base color at
+        // the configured root plate opacity), now as a beveled plate: the rolled
         // rim makes the popup read as a raised surface instead of a flat sheet.
         let mut bg_color = self.window_bg;
         if bg_color[3] > 0.001 {
