@@ -310,7 +310,7 @@ impl JsonLayoutWidget {
             let current_y = &mut page_current_y[p_idx];
             w_state.x = bx + pad_x;
 
-            let top_room = cce_ui::widget::label_offset(w_state.widget.as_dyn());
+            let top_room = w_state.widget.as_dyn().label_strip();
 
             let scroll_offset = self.page_scroll_y.get(p_idx).cloned().unwrap_or(0.0);
             w_state.y = by + *current_y - scroll_offset;
