@@ -87,6 +87,10 @@ needs-stdin decision, in `run_client()`).
   Icons are uploaded per popup on purpose (`cce_ui::icon::upload_themed` caches
   the decode, not the image id) because `Drop` destroys this app's `VkRenderer`
   between popups and an id cached across them would name freed GPU resources.
+  Apps is also the one **tabbed** mode: the list carries an *Apps* page and a
+  *System* page of DE verbs (`SYSTEM_COMMANDS` — window-manager actions through
+  `ccectl`, plus session/power commands), and **Tab / Shift+Tab step between
+  them**. See "Tabs" below.
 - `Json` — a `JsonLayoutConfig` read from stdin builds a widget panel; clicking a
   button prints one JSON object with the button id and every control's state
   (`{"button", "checkboxes", "spinboxes", "colors", "sliders"}`) and closes.
@@ -94,6 +98,53 @@ needs-stdin decision, in `run_client()`).
 Key flags: `-p/--prompt`, `-s/--select <item>`, `-x/-y` (position → forces layer-shell
 anchoring), `--align-right`, `--parent-app-id` (app_id becomes `cce-cloud:<parent>`),
 `--switcher`, and mode flags `--apps|--path|--dmenu|--json` (or `--mode <m>`).
+
+### Tabs
+
+`FuzzelWidget::tabs` splits the list into `TabPage`s. Fewer than two draws no
+strip and claims no height (`tab_strip_h()` is 0), which is what leaves Dmenu,
+Path and the Super-Tab window switcher laid out and keyed exactly as they were —
+**Tab only switches tabs where tabs exist**, and falls back to its old job of
+cycling the highlight everywhere else. That fallback is load-bearing: the
+switcher is Dmenu mode, and its Tab is the key the whole feature is named for.
+
+Three things to know before touching it:
+
+- **The active page's items and query live in `all_items` / `query`, not in its
+  `TabPage`.** Every pre-existing caller reads them there, and only
+  `switch_tab` moves them across — so a page's own copies are stale for as long
+  as it is the active one. Parking the query is what makes switching back land
+  on the same filtered rows.
+- **The stdin/socket feed addresses tab 0, through `set_tab_items`,** never
+  `set_items` directly. `check_stdin_updates` skips the ingest when the items
+  match what it last pushed; compared against the *active* tab that test would
+  differ on every poll and clobber the page the user is reading.
+- **A tab click is handled in the pointer branch, ahead of the row branch** —
+  next to the scrollbar press, and for the same reason. Any press
+  `FuzzelWidget::on_event` resolves is treated there as a row selection and (in
+  Dmenu/switcher mode) committed, so a tab click routed through it would choose
+  a row and close the popup.
+
+The list geometry is derived from `search_y()` / `list_y()` / `list_h()` rather
+than the `let pad = 15.0; let search_h = 35.0;` locals that used to be repeated
+in each of the paint, scroll and hit-test paths: the strip shifts the whole list
+down by its own height, and a path that missed the shift would put the rows, the
+clip and the click out of step. The icon gutter is per-tab
+(`recompute_icon_gutter`), so the System page's rows sit flush left while the
+Apps page keeps its column.
+
+The strip is painted by hand in the toolkit's recessed `ButtonStrip` idiom — one
+well carved into the window plate, segments on its floor, the active one a
+raised `control_plate` — because this widget paints straight onto the `PaintCtx`
+and has no child layout pass to host a real `ButtonStrip`.
+
+`SYSTEM_COMMANDS` is hardcoded, not config-driven: the rows are the DE's own
+verbs, and a row naming a command `ccectl` does not have is one that silently
+does nothing when picked (`every_system_row_runs_something` pins the lookup the
+commit path makes). The window verbs act on the window *behind* the popup — the
+compositor's `focused_window` skips overlay UI and names `cce-cloud` among it,
+falling back to the most recent real window — which is the only reason "Close
+Window" from a launcher means anything.
 
 ### Rendering: hand-rolled loop on `cce_ui::vk`, not the cce-ui engine runner
 

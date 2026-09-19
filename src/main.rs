@@ -1641,6 +1641,18 @@ impl State {
             );
             fuzzel.set_item_icons(icons);
 
+            // Apps is the only tabbed mode. Dmenu carries arbitrary caller
+            // items (and the Super-Tab window switcher, whose Tab key must
+            // keep cycling the highlight), Path is a raw $PATH dump, and Json
+            // is not a list at all.
+            fuzzel.set_tabs(vec![
+                ("Apps".to_string(), Vec::new()),
+                (
+                    SYSTEM_TAB_TITLE.to_string(),
+                    SYSTEM_COMMANDS.iter().map(|c| c.name.to_string()).collect(),
+                ),
+            ]);
+
             if let Ok(mut lock_state) = stdin_state.lock() {
                 lock_state.items = app_names;
                 lock_state.new_data = true;
@@ -1750,8 +1762,11 @@ impl State {
 
                 let mut changed = false;
                 let items = lock.items.clone();
-                if self.fuzzel.all_items != items {
-                    self.fuzzel.set_items(items);
+                // Against tab 0's items, not the active tab's: the feed only
+                // ever fills the mode's own list, and comparing against
+                // whatever tab the user is reading would differ every time.
+                if self.fuzzel.tab_items(0) != items.as_slice() {
+                    self.fuzzel.set_tab_items(0, items);
                     changed = true;
                     if let Some(ref select_name) = self.select_item {
                         let select_lower = select_name.to_lowercase();
@@ -1809,7 +1824,7 @@ impl State {
         }
         let num_items = self.fuzzel.filtered_items.len();
         let item_count = if num_items == 0 { 1 } else { num_items };
-        let needed_height = 75.0 + (item_count as f32) * 25.0;
+        let needed_height = 75.0 + self.fuzzel.tab_strip_h() + (item_count as f32) * 25.0;
         let target_height = needed_height.min(self.max_height as f32);
 
         // Calculate max text width
@@ -1839,6 +1854,24 @@ impl State {
                 if tw > max_text_w {
                     max_text_w = tw;
                 }
+            }
+        }
+
+        // The strip's segments are equal shares of the run, so the whole run
+        // has to hold its widest title n times over or the narrowest tab
+        // clips. (Today it fits inside the 300px floor below; it is measured
+        // rather than assumed so adding a third tab cannot quietly break it.)
+        let titles: Vec<String> = self.fuzzel.tabs.iter().map(|t| t.title.clone()).collect();
+        if titles.len() > 1 {
+            let mut widest = 0.0f32;
+            for title in &titles {
+                let buf = make_text_buffer(&mut self.font_system, title, TAB_FONT_PX);
+                let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
+                widest = widest.max(tw);
+            }
+            let strip_w = (widest + 20.0) * titles.len() as f32;
+            if strip_w > max_text_w {
+                max_text_w = strip_w;
             }
         }
 
@@ -2105,20 +2138,22 @@ impl AppState {
                 if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                     self.selected_item = Some(item.clone());
                     println!("{}", item);
-                    match st.mode {
-                        LauncherMode::Apps => {
-                            if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
-                                record_app_launch(&app.name);
-                                place_next_at(&app.exec, st.invoked_at);
-                                spawn_app(app);
+                    if !run_system_item(&st.fuzzel, item) {
+                        match st.mode {
+                            LauncherMode::Apps => {
+                                if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                    record_app_launch(&app.name);
+                                    place_next_at(&app.exec, st.invoked_at);
+                                    spawn_app(app);
+                                }
                             }
+                            LauncherMode::Path => {
+                                place_next_at(item, st.invoked_at);
+                                spawn_command(item);
+                            }
+                            LauncherMode::Dmenu => {}
+                            LauncherMode::Json => {}
                         }
-                        LauncherMode::Path => {
-                            place_next_at(item, st.invoked_at);
-                            spawn_command(item);
-                        }
-                        LauncherMode::Dmenu => {}
-                        LauncherMode::Json => {}
                     }
                     should_close = true;
                 }
@@ -2371,6 +2406,17 @@ impl PointerHandler for AppState {
                                     st.upload_vertices();
                                     self.redraw = true;
                                 }
+                            } else if let Some(idx) = st.fuzzel.tab_at(cx, cy) {
+                                // Ahead of the row branch for the same reason
+                                // the scrollbar is: ANY press `on_event`
+                                // resolves is treated there as a selection and
+                                // — in Dmenu/switcher mode — committed. A tab
+                                // click must switch tabs, not choose a row.
+                                if st.fuzzel.switch_tab(idx) {
+                                    st.update_desired_size();
+                                    st.upload_vertices();
+                                    self.redraw = true;
+                                }
                             } else if st.fuzzel.scroll_box.press(cx, cy) {
                                 // Thumb grab or track jump. This must be handled here rather
                                 // than inside `on_event`, because the row branch below treats
@@ -2411,18 +2457,20 @@ impl PointerHandler for AppState {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
                                             println!("{}", item);
                                             self.selected_item = Some(item.clone());
-                                            match st.mode {
-                                                LauncherMode::Apps => {
-                                                    if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
-                                                        record_app_launch(&app.name);
-                                                        spawn_app(app);
+                                            if !run_system_item(&st.fuzzel, item) {
+                                                match st.mode {
+                                                    LauncherMode::Apps => {
+                                                        if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
+                                                            record_app_launch(&app.name);
+                                                            spawn_app(app);
+                                                        }
                                                     }
+                                                    LauncherMode::Path => {
+                                                        spawn_command(item);
+                                                    }
+                                                    LauncherMode::Dmenu => {}
+                                                    LauncherMode::Json => {}
                                                 }
-                                                LauncherMode::Path => {
-                                                    spawn_command(item);
-                                                }
-                                                LauncherMode::Dmenu => {}
-                                                LauncherMode::Json => {}
                                             }
                                             should_close = true;
                                         }
@@ -2812,17 +2860,27 @@ impl AppState {
             return;
         }
 
-        // Shift+Tab arrives as ISO_Left_Tab: cycle the highlight backwards
-        // with wrap, mirroring Tab's forward cycle below.
+        // Shift+Tab arrives as ISO_Left_Tab: step back through the tabs where
+        // the list has them, else cycle the highlight backwards with wrap —
+        // mirroring Tab's forward step below in both halves.
         if event.keysym == xkeysym::Keysym::ISO_Left_Tab {
             if let Some(st) = &mut self.state {
-                if st.mode != LauncherMode::Json && !st.fuzzel.filtered_items.is_empty() {
-                    let len = st.fuzzel.filtered_items.len();
-                    st.fuzzel.selected = (st.fuzzel.selected + len - 1) % len;
-                    st.fuzzel.update_scroll();
-                    st.fuzzel.snap_to_selected();
-                    st.upload_vertices();
-                    self.redraw = true;
+                if st.mode != LauncherMode::Json {
+                    let mut changed = false;
+                    if st.fuzzel.cycle_tab(false) {
+                        st.update_desired_size();
+                        changed = true;
+                    } else if !st.fuzzel.filtered_items.is_empty() {
+                        let len = st.fuzzel.filtered_items.len();
+                        st.fuzzel.selected = (st.fuzzel.selected + len - 1) % len;
+                        st.fuzzel.update_scroll();
+                        st.fuzzel.snap_to_selected();
+                        changed = true;
+                    }
+                    if changed {
+                        st.upload_vertices();
+                        self.redraw = true;
+                    }
                 }
             }
             return;
@@ -2894,7 +2952,16 @@ impl AppState {
                         self.trigger_select_and_close();
                     }
                     Key::Named(NamedKey::Tab) => {
-                        if !st.fuzzel.filtered_items.is_empty() {
+                        // Tab switches tabs where there are tabs — the Apps
+                        // mode's Apps/System split. It keeps its old job of
+                        // cycling the highlight with wrap in the single-tab
+                        // modes, which is what the Super-Tab window switcher
+                        // (Dmenu, one tab) rides on.
+                        if st.fuzzel.cycle_tab(true) {
+                            st.update_desired_size();
+                            st.upload_vertices();
+                            self.redraw = true;
+                        } else if !st.fuzzel.filtered_items.is_empty() {
                             st.fuzzel.selected = (st.fuzzel.selected + 1) % st.fuzzel.filtered_items.len();
                             st.fuzzel.update_scroll();
                             st.fuzzel.snap_to_selected();
@@ -4282,6 +4349,82 @@ mod tests {
         assert_eq!(apps[0].exec, "editor-user");
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_tab_keeps_its_own_query_and_items() {
+        let mut f = FuzzelWidget::new("Search: ".to_string());
+        f.set_tabs(vec![
+            ("Apps".to_string(), vec!["Firefox".to_string(), "Files".to_string()]),
+            ("System".to_string(), vec!["Suspend".to_string(), "Reboot".to_string()]),
+        ]);
+        f.query.push_str("fi");
+        f.filter();
+        assert_eq!(f.filtered_items, vec!["Firefox".to_string(), "Files".to_string()]);
+
+        assert!(f.cycle_tab(true));
+        assert_eq!(f.active_tab, 1);
+        // The System tab opens on its own (empty) query, not the Apps one.
+        assert_eq!(f.query, "");
+        assert_eq!(f.filtered_items, vec!["Suspend".to_string(), "Reboot".to_string()]);
+
+        // ...and coming back lands on the query that was left behind.
+        assert!(f.cycle_tab(true), "two tabs wrap");
+        assert_eq!(f.active_tab, 0);
+        assert_eq!(f.query, "fi");
+        assert_eq!(f.filtered_items, vec!["Firefox".to_string(), "Files".to_string()]);
+    }
+
+    #[test]
+    fn the_feed_fills_tab_zero_from_any_tab() {
+        let mut f = FuzzelWidget::new("Search: ".to_string());
+        f.set_tabs(vec![
+            ("Apps".to_string(), Vec::new()),
+            ("System".to_string(), vec!["Suspend".to_string()]),
+        ]);
+        f.switch_tab(1);
+        // The stdin/socket ingest addresses tab 0 while the user reads tab 1:
+        // the rows on screen must not move, and the items must still land.
+        f.set_tab_items(0, vec!["Firefox".to_string()]);
+        assert_eq!(f.filtered_items, vec!["Suspend".to_string()]);
+        assert_eq!(f.tab_items(0), ["Firefox".to_string()]);
+        f.switch_tab(0);
+        assert_eq!(f.filtered_items, vec!["Firefox".to_string()]);
+    }
+
+    #[test]
+    fn an_untabbed_list_takes_no_chrome_and_does_not_cycle() {
+        let mut f = FuzzelWidget::new("Search: ".to_string());
+        f.set_items(vec!["a".to_string(), "b".to_string()]);
+        // What keeps Dmenu, Path and the Super-Tab window switcher laid out
+        // and keyed exactly as they were.
+        assert_eq!(f.tab_strip_h(), 0.0);
+        assert!(!f.cycle_tab(true));
+        assert!(f.tab_at(20.0, 20.0).is_none());
+    }
+
+    #[test]
+    fn every_system_row_runs_something() {
+        // A row whose label no longer matches its command silently does
+        // nothing when picked, so the lookup the commit path makes is the
+        // thing to pin down.
+        let mut f = FuzzelWidget::new("Search: ".to_string());
+        f.set_tabs(vec![
+            ("Apps".to_string(), Vec::new()),
+            (
+                SYSTEM_TAB_TITLE.to_string(),
+                SYSTEM_COMMANDS.iter().map(|c| c.name.to_string()).collect(),
+            ),
+        ]);
+        f.switch_tab(1);
+        assert_eq!(f.filtered_items.len(), SYSTEM_COMMANDS.len());
+        for item in &f.filtered_items {
+            assert!(
+                SYSTEM_COMMANDS.iter().any(|c| c.name == item),
+                "System row {:?} resolves to no command",
+                item
+            );
+        }
     }
 
     #[test]
