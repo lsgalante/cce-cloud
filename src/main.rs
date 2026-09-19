@@ -591,6 +591,70 @@ fn spawn_detached(program: &str, args: &[&str]) {
 
 
 
+/// One row of the System tab: the label the list shows and the command that
+/// label runs.
+struct SystemCommand {
+    name: &'static str,
+    program: &'static str,
+    args: &'static [&'static str],
+}
+
+/// The System tab's rows — window-manager verbs driven through `ccectl` (the
+/// DE's control CLI already exposes every one of them, so there is nothing to
+/// reimplement here) plus the session and power commands that are not the
+/// compositor's to run.
+///
+/// The window verbs act on the window BEHIND this popup, not on the popup:
+/// the compositor's `focused_window` skips overlay UI and names `cce-cloud`
+/// explicitly among it, falling back to the most recent real window. That is
+/// what makes "Close Window" from a launcher mean anything at all.
+///
+/// Hardcoded rather than config-driven: these are the DE's own verbs, and a
+/// row naming a command `ccectl` does not have is a row that silently does
+/// nothing.
+const SYSTEM_COMMANDS: &[SystemCommand] = &[
+    SystemCommand { name: "Close Window", program: "ccectl", args: &["close"] },
+    SystemCommand { name: "Minimize Window", program: "ccectl", args: &["minimize"] },
+    SystemCommand { name: "Toggle Fullscreen", program: "ccectl", args: &["fullscreen"] },
+    SystemCommand { name: "Center Window", program: "ccectl", args: &["center-window"] },
+    SystemCommand { name: "Overlay Window Left", program: "ccectl", args: &["overlay-left"] },
+    SystemCommand { name: "Overlay Window Right", program: "ccectl", args: &["overlay-right"] },
+    SystemCommand { name: "Next Tiling Mode", program: "ccectl", args: &["mode-next"] },
+    SystemCommand { name: "Next Tiling Mode (Shared)", program: "ccectl", args: &["mode-next-shared"] },
+    SystemCommand { name: "Retile Windows", program: "ccectl", args: &["retile"] },
+    SystemCommand { name: "Toggle Overview", program: "ccectl", args: &["overview"] },
+    SystemCommand { name: "Zoom In", program: "ccectl", args: &["zoom-in"] },
+    SystemCommand { name: "Zoom Out", program: "ccectl", args: &["zoom-out"] },
+    SystemCommand { name: "Reset Zoom", program: "ccectl", args: &["zoom-reset"] },
+    SystemCommand { name: "Take Screenshot", program: "ccectl", args: &["screenshot"] },
+    SystemCommand { name: "Reload Configuration", program: "ccectl", args: &["reload"] },
+    SystemCommand { name: "Restart Compositor", program: "ccectl", args: &["restart-compositor"] },
+    SystemCommand { name: "Log Out", program: "ccectl", args: &["exit"] },
+    SystemCommand { name: "Turn Off Display", program: "ccectl", args: &["idle", "display", "off"] },
+    SystemCommand { name: "Suspend", program: "systemctl", args: &["suspend"] },
+    SystemCommand { name: "Reboot", program: "systemctl", args: &["reboot"] },
+    SystemCommand { name: "Power Off", program: "systemctl", args: &["poweroff"] },
+];
+
+/// The titles the tabbed launcher shows, in strip order. Tab 0 is the mode's
+/// own list; tab 1 is [`SYSTEM_COMMANDS`].
+const SYSTEM_TAB_TITLE: &str = "System";
+
+/// Run `item` if it is a System-tab row, and say whether it was. These rows
+/// are the DE's own verbs rather than apps: they go straight to `ccectl` (or
+/// systemd), with none of the desktop-entry or place-next handling an app
+/// launch gets.
+fn run_system_item(fuzzel: &FuzzelWidget, item: &str) -> bool {
+    if fuzzel.active_tab == 0 {
+        return false;
+    }
+    let Some(cmd) = SYSTEM_COMMANDS.iter().find(|c| c.name == item) else {
+        return false;
+    };
+    spawn_detached(cmd.program, cmd.args);
+    true
+}
+
 pub struct FuzzelWidget {
     x: f32,
     y: f32,
@@ -618,11 +682,44 @@ pub struct FuzzelWidget {
     /// glide, a keystroke refiltering the list, a keyboard snap.
     cursor: Option<(f32, f32)>,
     pub scroll_box: ScrollRegion,
+    /// The pages the list is split into. Fewer than two means no tab strip and
+    /// no chrome height for one, which is what keeps Dmenu, Path and the
+    /// Super-Tab window switcher laid out exactly as they were.
+    ///
+    /// The ACTIVE page's items and query live in `all_items` / `query`, not in
+    /// its `TabPage` — every existing caller reads them there, and only
+    /// [`Self::switch_tab`] moves them across. A page's own copies are
+    /// therefore stale for as long as it is the active one.
+    pub tabs: Vec<TabPage>,
+    pub active_tab: usize,
+    /// Tab under the pointer, mirroring `hovered` for the rows.
+    tab_hovered: Option<usize>,
+}
+
+/// One page of the tabbed list. See [`FuzzelWidget::tabs`] for which copy of
+/// `items` / `query` is the authoritative one.
+pub struct TabPage {
+    title: String,
+    items: Vec<String>,
+    query: String,
 }
 
 /// Icon edge length inside a 25px row, and the gap between it and the label.
 const ICON_PX: f32 = 17.0;
 const ICON_GAP: f32 = 8.0;
+
+/// The list chrome's metrics. These were repeated as bare `let pad = 15.0;`
+/// locals in every one of the paint, scroll and hit-test paths; the tab strip
+/// shifts the whole list down by its own height, so the offset has to be
+/// derived in one place or the rows, the clip and the click go out of step.
+const PAD: f32 = 15.0;
+const SEARCH_H: f32 = 35.0;
+const ITEM_H: f32 = 25.0;
+/// Height the tab strip claims off the top: a 22px segmented run and the gap
+/// between it and the search well.
+const TAB_STRIP_H: f32 = 30.0;
+/// Tab-title size — a step under the row labels, as a control label is.
+const TAB_FONT_PX: f32 = 12.0;
 
 impl FuzzelWidget {
     pub fn new(prompt: String) -> cce_ui::widget::Adapted<FuzzelWidget> {
@@ -645,20 +742,160 @@ impl FuzzelWidget {
             // the rows on scroll. The region already sits inset from the popup
             // edge, so the stock 4px edge inset reads right here.
             scroll_box: ScrollRegion::new(22.0, 0.0).with_sink_behind(true),
+            tabs: Vec::new(),
+            active_tab: 0,
+            tab_hovered: None,
         })
     }
 
     pub fn set_items(&mut self, items: Vec<String>) {
         self.all_items = items;
+        self.recompute_icon_gutter();
         self.filter();
+    }
+
+    /// Split the list into tabs. Tab 0 is the mode's own list — its items keep
+    /// arriving through [`Self::set_items`] — and every later tab carries the
+    /// items it is given here. A single tab (or none) draws no strip.
+    pub fn set_tabs(&mut self, tabs: Vec<(String, Vec<String>)>) {
+        self.tabs = tabs
+            .into_iter()
+            .map(|(title, items)| TabPage { title, items, query: String::new() })
+            .collect();
+        self.active_tab = 0;
+        if let Some(first) = self.tabs.first_mut() {
+            self.all_items = std::mem::take(&mut first.items);
+        }
+        self.recompute_icon_gutter();
+        self.filter();
+    }
+
+    /// Replace tab `idx`'s items wherever they are parked. The stdin/socket
+    /// feed always addresses tab 0 through this, never `set_items` directly:
+    /// the ingest compares against the items it last pushed, and on any other
+    /// tab that comparison would differ every time and clobber the list the
+    /// user is reading.
+    pub fn set_tab_items(&mut self, idx: usize, items: Vec<String>) {
+        if idx == self.active_tab {
+            self.set_items(items);
+        } else if let Some(page) = self.tabs.get_mut(idx) {
+            page.items = items;
+        }
+    }
+
+    /// The items tab `idx` holds right now — from `all_items` when it is the
+    /// active tab, from its parked page otherwise.
+    pub fn tab_items(&self, idx: usize) -> &[String] {
+        if idx == self.active_tab {
+            &self.all_items
+        } else {
+            self.tabs.get(idx).map(|p| p.items.as_slice()).unwrap_or(&[])
+        }
+    }
+
+    /// Move to tab `idx`, parking the current tab's items and query in its
+    /// page and unpacking the target's — so switching back lands on the same
+    /// query and the same rows. False when nothing moved.
+    pub fn switch_tab(&mut self, idx: usize) -> bool {
+        if idx >= self.tabs.len() || idx == self.active_tab {
+            return false;
+        }
+        self.tabs[self.active_tab].items = std::mem::take(&mut self.all_items);
+        self.tabs[self.active_tab].query = std::mem::take(&mut self.query);
+        self.active_tab = idx;
+        self.all_items = std::mem::take(&mut self.tabs[idx].items);
+        self.query = std::mem::take(&mut self.tabs[idx].query);
+        self.selected = 0;
+        self.scroll_box.scroll_y = 0.0;
+        self.recompute_icon_gutter();
+        self.filter();
+        true
+    }
+
+    /// Step one tab forward (or back) with wrap — what Tab and Shift+Tab do
+    /// once the list has more than one. False when there is nothing to step
+    /// through, which is the signal for those keys to fall back to their old
+    /// job of cycling the highlight.
+    pub fn cycle_tab(&mut self, forward: bool) -> bool {
+        let n = self.tabs.len();
+        if n < 2 {
+            return false;
+        }
+        let idx = if forward { (self.active_tab + 1) % n } else { (self.active_tab + n - 1) % n };
+        self.switch_tab(idx)
+    }
+
+    /// Height the tab strip takes off the top of the popup — 0 below two tabs.
+    pub fn tab_strip_h(&self) -> f32 {
+        if self.tabs.len() > 1 { TAB_STRIP_H } else { 0.0 }
+    }
+
+    /// The segmented run itself, inset from the popup edge like the search
+    /// well under it. `None` when no strip is drawn.
+    fn tab_strip_rect(&self) -> Option<cce_ui::scene::layout::Rect> {
+        (self.tabs.len() > 1).then(|| cce_ui::scene::layout::Rect {
+            x: self.x + PAD,
+            y: self.y + PAD,
+            width: self.w - PAD * 2.0,
+            height: TAB_STRIP_H - 8.0,
+        })
+    }
+
+    /// Segment `i` of the run — equal shares of its width.
+    fn tab_rect(&self, i: usize) -> Option<cce_ui::scene::layout::Rect> {
+        let strip = self.tab_strip_rect()?;
+        let seg_w = strip.width / self.tabs.len() as f32;
+        Some(cce_ui::scene::layout::Rect {
+            x: strip.x + i as f32 * seg_w,
+            y: strip.y,
+            width: seg_w,
+            height: strip.height,
+        })
+    }
+
+    /// The tab under `(px, py)` — the one predicate the strip's hover wash and
+    /// its click share, as `row_at` is for the rows.
+    pub fn tab_at(&self, px: f32, py: f32) -> Option<usize> {
+        let strip = self.tab_strip_rect()?;
+        if px < strip.x || px >= strip.x + strip.width || py < strip.y || py >= strip.y + strip.height {
+            return None;
+        }
+        let n = self.tabs.len();
+        Some((((px - strip.x) / (strip.width / n as f32)).floor() as usize).min(n - 1))
+    }
+
+    /// Y of the search well's top edge: under the tab strip, where there is one.
+    fn search_y(&self) -> f32 {
+        self.y + PAD + self.tab_strip_h()
+    }
+
+    /// Y of the list viewport's top edge — the number the scroll math, the row
+    /// hit-test, the clip and the empty-state label all have to agree on.
+    fn list_y(&self) -> f32 {
+        self.search_y() + SEARCH_H + 10.0
+    }
+
+    /// Height of the list viewport: everything left between it and the bottom
+    /// inset.
+    fn list_h(&self) -> f32 {
+        (self.y + self.h - PAD) - self.list_y()
+    }
+
+    /// Reserve the icon column only when some item on the ACTIVE tab resolved
+    /// an icon, so the System tab's rows sit flush left while the Apps tab
+    /// keeps its gutter. Within a tab the gutter still applies to every row
+    /// (see [`Self::set_item_icons`]).
+    fn recompute_icon_gutter(&mut self) {
+        let any = self.all_items.iter().any(|t| self.icons.contains_key(t));
+        self.icon_gutter = if any { ICON_PX + ICON_GAP } else { 0.0 };
     }
 
     /// Give rows an icon column. Only Apps mode calls this — Dmenu/Path items
     /// are arbitrary strings with nothing to look an icon up by, and they keep
     /// the flush-left layout they have always had because the gutter stays 0.
     pub fn set_item_icons(&mut self, icons: std::collections::HashMap<String, (u32, u32, u32)>) {
-        self.icon_gutter = if icons.is_empty() { 0.0 } else { ICON_PX + ICON_GAP };
         self.icons = icons;
+        self.recompute_icon_gutter();
     }
 
     /// The square an icon is fitted into for the row drawn at `draw_y`.
@@ -687,13 +924,8 @@ impl FuzzelWidget {
     }
 
     pub fn update_scroll(&mut self) {
-        let item_h = 25.0;
-        let pad = 15.0;
-        let search_h = 35.0;
-        let viewport_y = self.y + pad + search_h + 10.0;
-        let viewport_h = self.h - (pad + search_h + 10.0) - pad;
-        let content_h = self.filtered_items.len() as f32 * item_h;
-        self.scroll_box.update_bounds_raw(content_h, viewport_y, viewport_h);
+        let content_h = self.filtered_items.len() as f32 * ITEM_H;
+        self.scroll_box.update_bounds_raw(content_h, self.list_y(), self.list_h());
         self.refresh_hover();
     }
 
@@ -704,7 +936,7 @@ impl FuzzelWidget {
     /// and a row `get_draw_y` places in the viewport — partially visible
     /// rows included, drawn cut by the clip, so an edge sliver counts.
     fn row_at(&self, px: f32, py: f32) -> Option<usize> {
-        let item_h = 25.0;
+        let item_h = ITEM_H;
         if !self.scroll_box.hit(px, py) || self.scroll_box.hit_scrollbar(px, py) {
             return None;
         }
@@ -735,16 +967,16 @@ impl FuzzelWidget {
     /// change, so callers can skip the re-upload when nothing moved.
     pub fn refresh_hover(&mut self) -> bool {
         let now = self.cursor.and_then(|(px, py)| self.row_at(px, py));
-        let changed = now != self.hovered;
+        let tab_now = self.cursor.and_then(|(px, py)| self.tab_at(px, py));
+        let changed = now != self.hovered || tab_now != self.tab_hovered;
         self.hovered = now;
+        self.tab_hovered = tab_now;
         changed
     }
 
     pub fn snap_to_selected(&mut self) {
-        let item_h = 25.0;
-        let pad = 15.0;
-        let search_h = 35.0;
-        let viewport_h = self.h - (pad + search_h + 10.0) - pad;
+        let item_h = ITEM_H;
+        let viewport_h = self.list_h();
         let content_h = self.filtered_items.len() as f32 * item_h;
 
         if self.filtered_items.is_empty() {
@@ -779,11 +1011,7 @@ impl cce_ui::widget::Layout for FuzzelWidget {
         self.w = rect.width;
         self.h = rect.height;
 
-        let pad = 15.0;
-        let search_h = 35.0;
-        let viewport_y = rect.y + pad + search_h + 10.0;
-        let viewport_h = rect.height - (pad + search_h + 10.0) - pad;
-        self.scroll_box.set_rect(rect.x + pad, viewport_y, rect.width - pad * 2.0, viewport_h);
+        self.scroll_box.set_rect(self.x + PAD, self.list_y(), self.w - PAD * 2.0, self.list_h());
         self.update_scroll();
     }
 }
@@ -795,14 +1023,54 @@ impl cce_ui::widget::Paint for FuzzelWidget {
 
     fn paint(&self, _rect: cce_ui::scene::layout::Rect, ctx: &mut cce_ui::scene::paint::PaintCtx) {
         use cce_ui::scene::layout::Rect;
-        let pad = 15.0;
-        let search_h = 35.0;
+        let pad = PAD;
+
+        // Tab strip — one well carved into the window plate with the segments
+        // butting together on its floor and the active one raised back out of
+        // it, which is the toolkit's recessed ButtonStrip treatment rendered
+        // by hand (this widget paints straight onto the PaintCtx; nesting a
+        // real ButtonStrip would need a child layout pass it does not have).
+        if let Some(strip) = self.tab_strip_rect() {
+            let radius = cce_ui::layout::button_corner_radius();
+            let depth = cce_ui::layout::bevel_width().min(strip.height * 0.2);
+            let (floor, radii) =
+                cce_ui::layout::carve_inside(strip, (radius, radius, radius, radius), depth);
+            ctx.recess(floor, radii, depth);
+            let inset = depth * 0.5;
+            let seg_r = (radius - inset).max(0.0);
+            for i in 0..self.tabs.len() {
+                let Some(r) = self.tab_rect(i) else { continue };
+                let seg = Rect {
+                    x: r.x + inset,
+                    y: r.y + inset,
+                    width: (r.width - 2.0 * inset).max(0.0),
+                    height: (r.height - 2.0 * inset).max(0.0),
+                };
+                if i == self.active_tab {
+                    // Faceless on purpose: the floor shows through the raised
+                    // plate, so the active tab reads as part of the strip
+                    // rather than a chip dropped on it.
+                    ctx.control_plate(
+                        &cce_ui::widget::ControlPlate::control(
+                            seg,
+                            seg_r,
+                            cce_ui::widget::PlateStance::Raised,
+                            [0.0; 4],
+                        )
+                        .with_depth(depth),
+                    );
+                } else if self.tab_hovered == Some(i) {
+                    ctx.rounded_rect(seg, seg_r, (true, true, true, true), cce_ui::colors::PANEL_MENU_HOVER);
+                }
+            }
+        }
 
         // Search bar — a well recessed into the plate, its rim lit in the
         // highlight accent (the toolkit's focused-well treatment; the query
         // line always holds keyboard focus here). Replaces the flat fill +
         // 1px border quads.
-        let well = Rect { x: self.x + pad, y: self.y + pad, width: self.w - pad * 2.0, height: search_h };
+        let search_h = SEARCH_H;
+        let well = Rect { x: self.x + pad, y: self.search_y(), width: self.w - pad * 2.0, height: search_h };
         ctx.quad(well, [0.10, 0.10, 0.14, 1.0]);
         let depth = cce_ui::layout::bevel_width().min(search_h * 0.2);
         let hc = cce_ui::color::highlight_primary_color();
@@ -828,7 +1096,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         };
         ctx.clip(viewport, |ctx| {
             // Selected Item Highlight
-            let item_h = 25.0;
+            let item_h = ITEM_H;
             if !self.filtered_items.is_empty() {
                 let virtual_selected_y = self.selected as f32 * item_h;
                 if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
@@ -869,7 +1137,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             // only rows `get_draw_y` places in the viewport are emitted, so a
             // 300-app list still costs one image quad per visible row.
             if self.icon_gutter > 0.0 {
-                let item_h = 25.0;
+                let item_h = ITEM_H;
                 for (idx, item_text) in self.filtered_items.iter().enumerate() {
                     let Some((image, iw, ih)) = self.icons.get(item_text).copied() else { continue };
                     if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
@@ -1093,7 +1361,6 @@ struct State {
     mode: LauncherMode,
     apps: Vec<AppInfo>,
 
-    fade_factor: f32,
     max_width: u32,
     max_height: u32,
     select_item: Option<String>,
@@ -1430,7 +1697,6 @@ impl State {
             mode,
             apps,
 
-            fade_factor: 1.0,
             max_width: width,
             // For json mode the initial `height` is a crude pre-layout estimate
             // (it ignores per-widget label offsets), so it must not double as the
@@ -1671,23 +1937,16 @@ impl State {
 
     fn upload_vertices(&mut self) {
         let dl = self.collect_display_list();
-        let (mut verts, mut batches, mut images, features) =
+        let (verts, batches, images, features) =
             tessellate(&dl, self.width, self.height, self.scale as f32);
-        if self.fade_factor < 1.0 {
-            for v in &mut verts {
-                v.color[3] *= self.fade_factor;
-            }
-            // Images carry their own alpha rather than a vertex color, so they
-            // need the fade applied here too or every app icon would stay fully
-            // opaque over a list dissolving underneath it.
-            for i in &mut images {
-                i.alpha *= self.fade_factor;
-            }
-            // SDF-plate overlays (the recess rims) are shader-lit, not
-            // vertex-alpha — drop them during the close fade rather than let
-            // their shading linger at full strength over fading geometry.
-            batches.retain(|b| b.plate.is_none());
-        }
+        // No close fade is applied here any more, and deliberately so. This
+        // used to multiply every vertex and image alpha by a fade factor and
+        // then DROP the SDF-plate batches outright — which took the window's
+        // whole background plate with them, since a plate batch IS its cover
+        // quad, leaving the rows and text dissolving over nothing. The fade is
+        // the compositor's now (`cce_ui::ipc::request_close_fade`): it ramps
+        // this surface's scene-node opacity, which fades the backdrop blur
+        // behind the popup along with it.
         // The GPU upload happens in VkRenderer::draw_frame_2d, which consumes
         // vertex_data every frame.
         self.vertex_data = verts;
@@ -1713,7 +1972,6 @@ impl State {
             buffers.push(make_text_buffer(&mut self.font_system, &label.text, label.font_size));
         }
 
-        let alpha = self.fade_factor.clamp(0.0, 1.0);
         let spans: Vec<TextSpan> = buffers
             .iter()
             .zip(widget_labels.iter())
@@ -1737,7 +1995,8 @@ impl State {
                     label.color[0] as f32 / 255.0,
                     label.color[1] as f32 / 255.0,
                     label.color[2] as f32 / 255.0,
-                    alpha,
+                    // TextLabel carries RGB only; labels are opaque.
+                    1.0,
                 ],
                 rotation: None,
                 clip_circle: [0.0; 3],
@@ -1764,11 +2023,10 @@ impl State {
         }
     }
 
-    fn render(&mut self, fade_factor: f32) -> bool {
+    fn render(&mut self) -> bool {
         let now = std::time::Instant::now();
         self.last_tick = now;
 
-        self.fade_factor = fade_factor;
         self.upload_vertices();
         self.prepare_text();
         self.renderer.as_mut().unwrap().draw_frame_2d(Frame2D {
@@ -1815,19 +2073,28 @@ struct AppState {
     ctrl_pressed: bool,
     super_pressed: bool,
     switcher_mode: bool,
-    fade_out: bool,
-    fade_start: Option<std::time::Instant>,
-    fade_factor: f32,
+    /// When the compositor's close dissolve ends and this popup may go, set
+    /// by `trigger_close`. `None` while the popup is live. The surface has to
+    /// stay mapped until then — the fade is the compositor ramping this
+    /// surface's scene-node opacity, and a destroyed surface cuts it off.
+    fade_until: Option<std::time::Instant>,
     cce_toplevel: Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>,
     selected_item: Option<String>,
 }
 
 impl AppState {
     fn trigger_close(&mut self) {
-        if !self.fade_out {
-            self.fade_out = true;
-            self.fade_start = Some(std::time::Instant::now());
-            self.redraw = true;
+        if self.fade_until.is_some() {
+            return;
+        }
+        // The compositor owns the dissolve and its duration; all this side
+        // does is hold the surface open for as long as it asks. A zero
+        // answer — fading configured off, or no compositor — means go now.
+        let fade = cce_ui::ipc::request_close_fade();
+        if fade.is_zero() {
+            self.exit = true;
+        } else {
+            self.fade_until = Some(std::time::Instant::now() + fade);
         }
     }
 
@@ -2835,9 +3102,7 @@ fn run_standalone() {
         ctrl_pressed: false,
         super_pressed: switcher_mode,
         switcher_mode,
-        fade_out: false,
-        fade_start: None,
-        fade_factor: 1.0,
+        fade_until: None,
         cce_toplevel: None,
         selected_item: None,
     };
@@ -2907,15 +3172,12 @@ fn run_standalone() {
 
     let mut last_tick = std::time::Instant::now();
     loop {
-        if app.fade_out {
-            if let Some(start) = app.fade_start {
-                let elapsed = start.elapsed().as_secs_f32();
-                app.fade_factor = (1.0 - elapsed / 0.15).max(0.0);
-                if app.fade_factor <= 0.0 {
-                    app.exit = true;
-                } else {
-                    app.redraw = true;
-                }
+        // The compositor is dissolving the popup out; hold the surface open
+        // until its deadline, then go. Nothing to redraw in the meantime —
+        // the pixels stay put and the scene node's opacity does the work.
+        if let Some(until) = app.fade_until {
+            if std::time::Instant::now() >= until {
+                app.exit = true;
             }
         }
 
@@ -2957,7 +3219,7 @@ fn run_standalone() {
         if app.redraw {
             app.redraw = false;
             if let Some(state) = &mut app.state {
-                let _ = state.render(app.fade_factor);
+                let _ = state.render();
             }
         }
     }
@@ -3113,9 +3375,7 @@ fn run_daemon(socket_path: &str) {
         ctrl_pressed: false,
         super_pressed: false,
         switcher_mode: false,
-        fade_out: false,
-        fade_start: None,
-        fade_factor: 1.0,
+        fade_until: None,
         cce_toplevel: None,
         selected_item: None,
     };
@@ -3402,9 +3662,7 @@ fn run_daemon(socket_path: &str) {
         app.state = Some(state);
 
         app.exit = false;
-        app.fade_out = false;
-        app.fade_start = None;
-        app.fade_factor = 1.0;
+        app.fade_until = None;
 
         // The reader thread only signals for lines that arrive after this
         // point; the initial_stdin items are already sitting in stdin_state,
@@ -3418,15 +3676,12 @@ fn run_daemon(socket_path: &str) {
         let mut first_frame_logged = false;
         let mut last_tick = std::time::Instant::now();
         while !app.exit {
-            if app.fade_out {
-                if let Some(start) = app.fade_start {
-                    let elapsed = start.elapsed().as_secs_f32();
-                    app.fade_factor = (1.0 - elapsed / 0.15).max(0.0);
-                    if app.fade_factor <= 0.0 {
-                        app.exit = true;
-                    } else {
-                        app.redraw = true;
-                    }
+            // The compositor is dissolving the popup out; hold the surface open
+            // until its deadline, then go. Nothing to redraw in the meantime —
+            // the pixels stay put and the scene node's opacity does the work.
+            if let Some(until) = app.fade_until {
+                if std::time::Instant::now() >= until {
+                    app.exit = true;
                 }
             }
 
@@ -3476,7 +3731,7 @@ fn run_daemon(socket_path: &str) {
             if app.redraw {
                 app.redraw = false;
                 if let Some(st) = &mut app.state {
-                    let _ = st.render(app.fade_factor);
+                    let _ = st.render();
                     if !first_frame_logged {
                         first_frame_logged = true;
                         log::info!("[timing] request -> first frame: {:?}", t_request.elapsed());
@@ -4116,8 +4371,28 @@ mod tests {
 impl FuzzelWidget {
     fn own_labels(&self) -> Vec<TextLabel> {
         let mut labels = Vec::new();
-        let pad = 15.0;
-        let search_h = 35.0;
+        let pad = PAD;
+
+        // Tab titles, centred on their segments. Outside the list clip, like
+        // the rest of the chrome.
+        for i in 0..self.tabs.len() {
+            let Some(r) = self.tab_rect(i) else { continue };
+            let title = &self.tabs[i].title;
+            let tw = cce_ui::widget::display::measure_text(title, TAB_FONT_PX);
+            labels.push(TextLabel {
+                text: title.clone(),
+                x: r.x + (r.width - tw) / 2.0,
+                y: r.y + (r.height - TAB_FONT_PX) / 2.0 - 1.0,
+                font_size: TAB_FONT_PX,
+                color: if i == self.active_tab {
+                    [0xff, 0xff, 0xff]
+                } else if self.tab_hovered == Some(i) {
+                    [0xe6, 0xe6, 0xee]
+                } else {
+                    [0x99, 0x99, 0xa6]
+                },
+            });
+        }
 
         let query_text = if self.query.is_empty() {
             format!("{}{}", self.prompt, "Type to search...")
@@ -4133,17 +4408,16 @@ impl FuzzelWidget {
         labels.push(TextLabel {
             text: query_text,
             x: self.x + pad + 10.0,
-            y: self.y + pad + 9.0,
+            y: self.search_y() + 9.0,
             font_size: 14.0,
             color: query_color,
         });
 
         if self.filtered_items.is_empty() {
-            let list_y = self.y + pad + search_h + 10.0;
             labels.push(TextLabel {
                 text: "No matches found".to_string(),
                 x: self.x + pad + 10.0,
-                y: list_y + 4.0,
+                y: self.list_y() + 4.0,
                 font_size: 13.0,
                 color: [0x88, 0x88, 0x99],
             });
@@ -4156,8 +4430,8 @@ impl FuzzelWidget {
     /// in) the viewport. Emitted under the paint walk's list clip, separately
     /// from [`Self::own_labels`], which draws chrome outside it.
     fn row_labels(&self) -> Vec<TextLabel> {
-        let pad = 15.0;
-        let item_h = 25.0;
+        let pad = PAD;
+        let item_h = ITEM_H;
         let mut labels = Vec::new();
         for (idx, item_text) in self.filtered_items.iter().enumerate() {
             let virtual_y = idx as f32 * item_h;

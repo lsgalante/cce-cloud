@@ -104,10 +104,9 @@ backend): `collect_display_list` builds a `PaintCtx` (beveled window plate, then
 active widget's `paint_self` walk — bevel/recess prims included), `upload_vertices`
 runs it through `tessellate_display_list` into `State::vertex_data` + `frame_batches`
 (`Batch2D`, physical-px scissors) + `plate_features`, `prepare_text` builds `TextSpan`s
-from the paint walk (buffers shaped at logical size, spans scaled to physical; fade
-alpha rides `default_color`), and `render` is `draw_frame_2d(Frame2D { .. })`. During
-the close fade, shader-lit plate batches (recess rims) are dropped — their shading is
-not vertex-alpha and would linger at full strength. `tessellate` must carry the tessellator's image
+from the paint walk (buffers shaped at logical size, spans scaled to physical), and
+`render` is `draw_frame_2d(Frame2D { .. })`. Nothing in this path knows about the
+open/close fade any more — see "Fading in and out" below. `tessellate` must carry the tessellator's image
 list across to `Frame2D::images`: images ride a separate pipeline from the vertex
 batches, and that return value was dropped (with `images: &[]` hardcoded) until
 2026-08-16, which made `PaintCtx::image` a silent no-op *in this app only* while
@@ -125,7 +124,29 @@ layer-shell **Overlay** surface with exclusive keyboard. The window continuously
 auto-sizes to its content (`update_desired_size` — list rows measured with
 `cce_ui::cosmic_text` buffers, the JSON panel's widgets with
 `cce_ui::widget::display::measure_text`)
-and closes through a ~150ms fade-out (`trigger_close` → `fade_factor`).
+and closes through the DE-wide dissolve (`trigger_close`, below).
+
+### Fading in and out
+
+The popup dissolves in when it maps and back out when it closes, and **neither
+is drawn by this app** — both are the compositor ramping the opacity of the
+surface's scene node, which carries the backdrop blur behind the popup down
+with it. All this side does on close is ask and then wait:
+`trigger_close` calls `cce_ui::ipc::request_close_fade()` (one `fade-out` line
+on the compositor's control socket, answered with a duration in ms), stores
+the deadline in `fade_until`, and keeps the surface mapped until the loop
+sees it pass. Nothing is redrawn in between — the pixels stay put while the
+scene node fades under them.
+
+This replaced a hand-rolled fade that multiplied every vertex and image alpha
+by a factor and then dropped the SDF-plate batches outright. A plate batch
+**is** its cover quad, and the window background is a plate, so the first
+frame of every close fade deleted the entire background and left the rows and
+text dissolving over nothing. That is the failure mode to remember: per-element
+alpha cannot express a window fade, because a client's surface stays fully
+present to the compositor no matter how transparent it draws itself — the blur
+behind it does not fade, and shader-lit output (plate rims, specular) never
+honoured the vertex alpha in the first place.
 
 `-x/-y` is a *cursor* position (the compositor hands the raw pointer to the desktop
 and window-border context menus), not a final window origin — `Placement` fits it to
