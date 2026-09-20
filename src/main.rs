@@ -1948,8 +1948,7 @@ impl State {
             let (wx, wy, ww, wh) = self.window_rect;
             pc.plate_spec(&cce_ui::scene::paint::PlateSpec {
                 rect: Rect { x: wx, y: wy, width: ww, height: wh },
-                color: bg_color,
-                blur: false,
+                material: cce_ui::scene::Material::opaque(bg_color),
                 window_corners: (true, true, true, true),
                 depth: cce_ui::color::plate_bevel_width(),
             });
