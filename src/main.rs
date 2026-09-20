@@ -1112,7 +1112,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
                         height: item_h - 2.0,
                     };
                     let depth = cce_ui::color::plate_bevel_width().min(sel.height * 0.2);
-                    ctx.bevel(sel, (4.0, 4.0, 4.0, 4.0), [0.20, 0.35, 0.65, 0.9], depth);
+                    ctx.bevel(sel, (4.0, 4.0, 4.0, 4.0), &cce_ui::scene::Material::from_fill([0.20, 0.35, 0.65, 0.9]), depth);
                 }
             }
 
