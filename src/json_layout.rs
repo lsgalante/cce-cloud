@@ -676,7 +676,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
             // tall run would otherwise cut a far deeper channel.
             let depth = cce_ui::layout::bevel_width().min(first.h * 0.2);
             pc.clip(clip, |pc| {
-                pc.inset_plate(run, (radius, radius, radius, radius), face, depth);
+                pc.inset_plate(run, (radius, radius, radius, radius), cce_ui::scene::Material::face(face).as_ref(), depth);
             });
             // Seams are collected, not drawn yet: they are pure shading and
             // must land ON TOP of the rows. A hovered row fills its whole

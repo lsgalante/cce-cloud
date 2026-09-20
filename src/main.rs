@@ -1055,7 +1055,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
                             seg,
                             seg_r,
                             cce_ui::widget::PlateStance::Raised,
-                            [0.0; 4],
+                            None,
                         )
                         .with_depth(depth),
                     );
