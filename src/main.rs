@@ -2485,7 +2485,16 @@ impl PointerHandler for AppState {
                             if st.mode == LauncherMode::Json {
                                 let mut changed = false;
                                 let mut clicked_btn_id = None;
+                                // A `target_page` button switches pages inside
+                                // propagate_event (JsonLayoutWidget takes its
+                                // click there, so it never reaches the
+                                // clicked_btn_id scan below). The popup is
+                                // sized per page — a submenu page with more
+                                // rows than the first was clipped to the first
+                                // page's height until this resize.
+                                let mut page_switched = false;
                                 if let Some(jl) = &mut st.json_layout {
+                                    let page_before = jl.active_page;
                                     let ev = cce_ui::widget::Event::MouseButton {
                                         button: cce_ui::widget::MouseButton::Left,
                                         state: cce_ui::widget::ElementState::Released,
@@ -2499,6 +2508,7 @@ impl PointerHandler for AppState {
                                     if st.ui_context.propagate_event(&ev, root) {
                                         changed = true;
                                     }
+                                    page_switched = jl.active_page != page_before;
                                     for w in &mut jl.widgets {
                                         // take_click is an WidgetHost method; Phase 5 Buttons are
                                         // Adapted, so ask the box directly.
@@ -2507,6 +2517,10 @@ impl PointerHandler for AppState {
                                             break;
                                         }
                                     }
+                                }
+                                if page_switched {
+                                    st.update_desired_size();
+                                    changed = true;
                                 }
                                 if changed {
                                     st.upload_vertices();
