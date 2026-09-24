@@ -1946,12 +1946,11 @@ impl State {
             // them to the shared curve. Depth stays this app's shallower
             // plate_bevel_width, not the window default.
             let (wx, wy, ww, wh) = self.window_rect;
-            pc.plate_spec(&cce_ui::scene::paint::PlateSpec {
-                rect: Rect { x: wx, y: wy, width: ww, height: wh },
-                material: cce_ui::scene::Material::opaque(bg_color),
-                window_corners: (true, true, true, true),
-                depth: cce_ui::color::plate_bevel_width(),
-            });
+            pc.plate_spec(
+                &cce_ui::scene::paint::PlateSpec::root_at(Rect { x: wx, y: wy, width: ww, height: wh })
+                    .with_material(cce_ui::scene::Material::opaque(bg_color))
+                    .with_depth(cce_ui::color::plate_bevel_width()),
+            );
         }
 
         // 2. Child widgets, through the paint walk: bevel/recess prims reach the
