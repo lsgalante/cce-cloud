@@ -704,20 +704,29 @@ pub struct TabPage {
     query: String,
 }
 
-/// Icon edge length inside a 25px row, and the gap between it and the label.
+/// Icon edge length inside a 25px row. The gap between it and the label is
+/// the toolkit's control text inset, the same standoff the label keeps from
+/// the selection chip's edge.
 const ICON_PX: f32 = 17.0;
-const ICON_GAP: f32 = 8.0;
 
-/// The list chrome's metrics. These were repeated as bare `let pad = 15.0;`
-/// locals in every one of the paint, scroll and hit-test paths; the tab strip
-/// shifts the whole list down by its own height, so the offset has to be
-/// derived in one place or the rows, the clip and the click go out of step.
-const PAD: f32 = 15.0;
+/// The list chrome's metrics. The spacing around them — the inset from the
+/// popup edge, the gap under the tab strip and under the search well, the
+/// text inset inside a well or a row — is the toolkit's ladder
+/// (`cce_ui::layout::root_plate_inset` / `root_plate_gap` /
+/// `CONTROL_TEXT_INSET`), read where it is used; these were repeated as bare
+/// `let pad = 15.0;` locals in every one of the paint, scroll and hit-test
+/// paths. The tab strip shifts the whole list down by its own height, so the
+/// offset has to be derived in one place or the rows, the clip and the click
+/// go out of step.
 const SEARCH_H: f32 = 35.0;
 const ITEM_H: f32 = 25.0;
-/// Height the tab strip claims off the top: a 22px segmented run and the gap
-/// between it and the search well.
-const TAB_STRIP_H: f32 = 30.0;
+/// Height of the tab strip's segmented run; the strip claims this plus one
+/// root-plate gap off the top (see [`FuzzelWidget::tab_strip_h`]).
+const TAB_RUN_H: f32 = 22.0;
+/// style: deliberate — the hairline the selection chip (and the hover wash on
+/// its footprint) stands in from the list viewport on each side, so the chip's
+/// roll clears the clip. A standoff, not a rung of the spacing ladder.
+const CHIP_STANDOFF: f32 = 2.0;
 /// Tab-title size — a step under the row labels, as a control label is.
 const TAB_FONT_PX: f32 = 12.0;
 
@@ -825,19 +834,21 @@ impl FuzzelWidget {
         self.switch_tab(idx)
     }
 
-    /// Height the tab strip takes off the top of the popup — 0 below two tabs.
+    /// Height the tab strip takes off the top of the popup — the run and the
+    /// gap between it and the search well; 0 below two tabs.
     pub fn tab_strip_h(&self) -> f32 {
-        if self.tabs.len() > 1 { TAB_STRIP_H } else { 0.0 }
+        if self.tabs.len() > 1 { TAB_RUN_H + cce_ui::layout::root_plate_gap() } else { 0.0 }
     }
 
     /// The segmented run itself, inset from the popup edge like the search
     /// well under it. `None` when no strip is drawn.
     fn tab_strip_rect(&self) -> Option<cce_ui::scene::layout::Rect> {
+        let inset = cce_ui::layout::root_plate_inset();
         (self.tabs.len() > 1).then(|| cce_ui::scene::layout::Rect {
-            x: self.x + PAD,
-            y: self.y + PAD,
-            width: self.w - PAD * 2.0,
-            height: TAB_STRIP_H - 8.0,
+            x: self.x + inset,
+            y: self.y + inset,
+            width: self.w - inset * 2.0,
+            height: TAB_RUN_H,
         })
     }
 
@@ -866,19 +877,39 @@ impl FuzzelWidget {
 
     /// Y of the search well's top edge: under the tab strip, where there is one.
     fn search_y(&self) -> f32 {
-        self.y + PAD + self.tab_strip_h()
+        self.y + cce_ui::layout::root_plate_inset() + self.tab_strip_h()
     }
 
     /// Y of the list viewport's top edge — the number the scroll math, the row
     /// hit-test, the clip and the empty-state label all have to agree on.
     fn list_y(&self) -> f32 {
-        self.search_y() + SEARCH_H + 10.0
+        self.search_y() + SEARCH_H + cce_ui::layout::root_plate_gap()
     }
 
     /// Height of the list viewport: everything left between it and the bottom
     /// inset.
     fn list_h(&self) -> f32 {
-        (self.y + self.h - PAD) - self.list_y()
+        (self.y + self.h - cce_ui::layout::root_plate_inset()) - self.list_y()
+    }
+
+    /// X of the text in a row (and of the query line in the search well): the
+    /// control text inset past the selection chip's edge, which itself stands
+    /// a hairline in from the list. Icons start here too.
+    fn text_x(&self) -> f32 {
+        self.x + cce_ui::layout::root_plate_inset() + CHIP_STANDOFF + cce_ui::layout::CONTROL_TEXT_INSET
+    }
+
+    /// Vertical chrome around the list: the inset above and below, the search
+    /// well and the gap under it, and the tab strip when there is one. What
+    /// the popup's height is over its rows.
+    pub fn chrome_h(&self) -> f32 {
+        2.0 * cce_ui::layout::root_plate_inset() + self.tab_strip_h() + SEARCH_H + cce_ui::layout::root_plate_gap()
+    }
+
+    /// Horizontal chrome around a row's text: the text inset on both sides.
+    /// What the popup's width is over its widest label.
+    pub fn chrome_w(&self) -> f32 {
+        2.0 * (self.text_x() - self.x)
     }
 
     /// Reserve the icon column only when some item on the ACTIVE tab resolved
@@ -887,7 +918,7 @@ impl FuzzelWidget {
     /// (see [`Self::set_item_icons`]).
     fn recompute_icon_gutter(&mut self) {
         let any = self.all_items.iter().any(|t| self.icons.contains_key(t));
-        self.icon_gutter = if any { ICON_PX + ICON_GAP } else { 0.0 };
+        self.icon_gutter = if any { ICON_PX + cce_ui::layout::CONTROL_TEXT_INSET } else { 0.0 };
     }
 
     /// Give rows an icon column. Only Apps mode calls this — Dmenu/Path items
@@ -900,14 +931,13 @@ impl FuzzelWidget {
 
     /// The square an icon is fitted into for the row drawn at `draw_y`.
     fn icon_rect(&self, draw_y: f32, item_h: f32, w: u32, h: u32) -> cce_ui::scene::layout::Rect {
-        let pad = 15.0;
         // Fit the longer side to ICON_PX so a non-square icon keeps its aspect
         // ratio and stays centered in the column.
         let (w, h) = (w.max(1) as f32, h.max(1) as f32);
         let s = ICON_PX / w.max(h);
         let (iw, ih) = (w * s, h * s);
         cce_ui::scene::layout::Rect {
-            x: self.x + pad + 10.0 + (ICON_PX - iw) / 2.0,
+            x: self.text_x() + (ICON_PX - iw) / 2.0,
             y: draw_y + (item_h - ih) / 2.0,
             width: iw,
             height: ih,
@@ -1011,7 +1041,8 @@ impl cce_ui::widget::Layout for FuzzelWidget {
         self.w = rect.width;
         self.h = rect.height;
 
-        self.scroll_box.set_rect(self.x + PAD, self.list_y(), self.w - PAD * 2.0, self.list_h());
+        let inset = cce_ui::layout::root_plate_inset();
+        self.scroll_box.set_rect(self.x + inset, self.list_y(), self.w - inset * 2.0, self.list_h());
         self.update_scroll();
     }
 }
@@ -1023,7 +1054,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
 
     fn paint(&self, _rect: cce_ui::scene::layout::Rect, ctx: &mut cce_ui::scene::paint::PaintCtx) {
         use cce_ui::scene::layout::Rect;
-        let pad = PAD;
+        let pad = cce_ui::layout::root_plate_inset();
 
         // Tab strip — one well carved into the window plate with the segments
         // butting together on its floor and the active one raised back out of
@@ -1106,10 +1137,10 @@ impl cce_ui::widget::Paint for FuzzelWidget {
                     // bar idles under the list bg and rides OVER the rows while
                     // raised, so the chip keeps its full width either way.
                     let sel = Rect {
-                        x: self.x + pad + 2.0,
+                        x: self.x + pad + CHIP_STANDOFF,
                         y: draw_y,
-                        width: self.w - pad * 2.0 - 4.0,
-                        height: item_h - 2.0,
+                        width: self.w - pad * 2.0 - 2.0 * CHIP_STANDOFF,
+                        height: item_h - CHIP_STANDOFF,
                     };
                     let depth = cce_ui::color::plate_bevel_width().min(sel.height * 0.2);
                     ctx.bevel(sel, (4.0, 4.0, 4.0, 4.0), &cce_ui::scene::Material::from_fill([0.20, 0.35, 0.65, 0.9]), depth);
@@ -1124,10 +1155,10 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             if let Some(idx) = self.hovered.filter(|&i| i != self.selected) {
                 if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
                     let hov = Rect {
-                        x: self.x + pad + 2.0,
+                        x: self.x + pad + CHIP_STANDOFF,
                         y: draw_y,
-                        width: self.w - pad * 2.0 - 4.0,
-                        height: item_h - 2.0,
+                        width: self.w - pad * 2.0 - 2.0 * CHIP_STANDOFF,
+                        height: item_h - CHIP_STANDOFF,
                     };
                     ctx.quad(hov, [0.20, 0.35, 0.65, 0.35]);
                 }
@@ -1233,6 +1264,8 @@ enum AppWindow {
 }
 
 /// Logical-px breathing room kept between a positioned popup and the screen edge.
+/// style: deliberate — a placement clearance against the OUTPUT edge, not an
+/// inset on any plate; the spacing ladder has no rung for it.
 const EDGE_GAP: i32 = 8;
 
 /// Logical geometry `(x, y, w, h)` of the output containing the point `(x, y)`, or —
@@ -1380,22 +1413,29 @@ struct State {
 
 /// Logical-px width one JSON-layout widget wants for the auto-sizing popup.
 ///
-/// Buttons are the subtlety: `cce_ui::widget::Button` draws its label with an 8px inset on
-/// each side (see `Button::paint`) in the *button* font — not the menubar font `measure_text`
-/// assumes. So measure the label the way the button itself does (`measure_text_width` in the
-/// button font/size) and budget the button's 16px of inset on top of the container's 16px-per-
-/// side margins; otherwise a left-justified label starts 8px in and spills past the button's
-/// right edge (`JsonLayoutWidget::layout_children` sets `usable_w = width - 32`).
+/// Buttons are the subtlety: `cce_ui::widget::Button` draws its label with the control text
+/// inset on each side (see `Button::paint`) in the *button* font — not the menubar font
+/// `measure_text` assumes. So measure the label the way the button itself does
+/// (`measure_text_width` in the button font/size) and budget the button's two insets on top
+/// of the container's root-plate inset per side; otherwise a left-justified label starts
+/// an inset in and spills past the button's right edge (`JsonLayoutWidget::layout_children`
+/// sets `usable_w = width - 2 * root_plate_inset()`).
 fn json_widget_desired_width(widget_type: &str, text: &str) -> f32 {
+    let margins = 2.0 * cce_ui::layout::root_plate_inset();
     match widget_type {
         "button" => {
             let (family, size) = cce_ui::layout::parse_font_string(&cce_ui::layout::button_font());
-            cce_ui::widget::display::measure_text_width(text, &family, size.unwrap_or(12.0)) + 48.0
+            cce_ui::widget::display::measure_text_width(text, &family, size.unwrap_or(12.0))
+                + margins
+                + 2.0 * cce_ui::layout::CONTROL_TEXT_INSET
         }
-        "label" => cce_ui::widget::display::measure_text(text, 13.0) + 32.0,
-        "checkbox" => cce_ui::widget::display::measure_text(text, 13.0) + 44.0,
-        "spinbox" | "color" => cce_ui::widget::display::measure_text(text, 13.0) + 120.0,
-        "slider" => cce_ui::widget::display::measure_text(text, 13.0) + 160.0,
+        "label" => cce_ui::widget::display::measure_text(text, 13.0) + margins,
+        // The remainders are each control's own width beside its label (the
+        // checkbox's box column, the spinbox's field, the slider's track), not
+        // spacing.
+        "checkbox" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 12.0,
+        "spinbox" | "color" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 88.0,
+        "slider" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 128.0,
         _ => 150.0,
     }
 }
@@ -1449,7 +1489,12 @@ impl State {
                     max_widget_w.round() as u32
                 });
                 let h = config.height.unwrap_or_else(|| {
-                    let mut current_y = 16.0f32;
+                    // The same walk as `JsonLayoutWidget::layout_children`:
+                    // the root-plate inset above, a root-plate gap after each
+                    // widget, and the trailing gap traded for the inset below.
+                    let inset = cce_ui::layout::root_plate_inset();
+                    let gap = cce_ui::layout::root_plate_gap();
+                    let mut current_y = inset;
                     if let Some(ref widgets) = config.widgets {
                         for w_conf in widgets {
                             let h = match w_conf.widget_type.as_str() {
@@ -1460,12 +1505,12 @@ impl State {
                                 "color" => 24.0,
                                 _ => 20.0,
                             };
-                            current_y += h + 12.0;
+                            current_y += h + gap;
                         }
                     } else if let Some(ref pages) = config.pages {
-                        let mut max_page_y = 16.0f32;
+                        let mut max_page_y = inset;
                         for page in pages {
-                            let mut page_y = 16.0f32;
+                            let mut page_y = inset;
                             for w_conf in &page.widgets {
                                 let h = match w_conf.widget_type.as_str() {
                                     "label" => 18.0,
@@ -1475,7 +1520,7 @@ impl State {
                                     "color" => 24.0,
                                     _ => 20.0,
                                 };
-                                page_y += h + 12.0;
+                                page_y += h + gap;
                             }
                             if page_y > max_page_y {
                                 max_page_y = page_y;
@@ -1483,7 +1528,7 @@ impl State {
                         }
                         current_y = max_page_y;
                     }
-                    current_y += 4.0;
+                    current_y = (current_y - gap).max(inset) + inset;
                     std::cmp::min(current_y.round() as u32, 600)
                 });
                 (w, h)
@@ -1824,7 +1869,7 @@ impl State {
         }
         let num_items = self.fuzzel.filtered_items.len();
         let item_count = if num_items == 0 { 1 } else { num_items };
-        let needed_height = 75.0 + self.fuzzel.tab_strip_h() + (item_count as f32) * 25.0;
+        let needed_height = self.fuzzel.chrome_h() + (item_count as f32) * ITEM_H;
         let target_height = needed_height.min(self.max_height as f32);
 
         // Calculate max text width
@@ -1869,14 +1914,16 @@ impl State {
                 let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
                 widest = widest.max(tw);
             }
-            let strip_w = (widest + 20.0) * titles.len() as f32;
+            // Each title gets the control text inset on both sides, as a
+            // button label does.
+            let strip_w = (widest + 2.0 * cce_ui::layout::CONTROL_TEXT_INSET) * titles.len() as f32;
             if strip_w > max_text_w {
                 max_text_w = strip_w;
             }
         }
 
         let scrollbar_w = if needed_height > self.max_height as f32 { 10.0 } else { 0.0 };
-        let needed_width = max_text_w + 50.0 + scrollbar_w;
+        let needed_width = max_text_w + self.fuzzel.chrome_w() + scrollbar_w;
         let target_width = needed_width.clamp(300.0, self.max_width as f32);
 
         self.resize_window(target_width.round() as u32, target_height.round() as u32);
@@ -4027,24 +4074,28 @@ mod tests {
 
     #[test]
     fn button_width_covers_label_inset() {
-        // Regression: a left-justified Button draws its label 8px in from its own left edge
-        // (Button::paint) in the button font. layout_children gives the button
-        // `usable_w = popup_width - 32`. If the popup width doesn't budget the button's
-        // 8px-per-side inset, the label spills past the button's right edge — the desktop
-        // context-menu bug. Every desktop-menu label must fit within usable_w with the inset.
+        // Regression: a left-justified Button draws its label the control text inset in
+        // from its own left edge (Button::paint) in the button font. layout_children gives
+        // the button `usable_w = popup_width - 2 * root_plate_inset()`. If the popup width
+        // doesn't budget the button's inset per side, the label spills past the button's
+        // right edge — the desktop context-menu bug. Every desktop-menu label must fit
+        // within usable_w with the inset.
         let (family, size) = cce_ui::layout::parse_font_string(&cce_ui::layout::button_font());
         let size = size.unwrap_or(12.0);
+        let text_inset = cce_ui::layout::CONTROL_TEXT_INSET;
         for label in [
             "Terminal", "Files", "Data Editor", "Applications",
             "System Settings", "Expose Windows", "Reload Config", "Logout",
         ] {
             let popup_w = json_widget_desired_width("button", label);
-            let usable_w = popup_w - 32.0; // container margins, per layout_children
+            // container margins, per layout_children
+            let usable_w = popup_w - 2.0 * cce_ui::layout::root_plate_inset();
             let label_w = cce_ui::widget::display::measure_text_width(label, &family, size);
-            // 8px left inset + label + 8px right breathing room must fit the button.
+            // left inset + label + right breathing room must fit the button.
             assert!(
-                usable_w >= label_w + 16.0,
-                "button '{label}': usable_w {usable_w} < label {label_w} + 16 inset",
+                usable_w >= label_w + 2.0 * text_inset,
+                "button '{label}': usable_w {usable_w} < label {label_w} + {} inset",
+                2.0 * text_inset,
             );
         }
     }
@@ -4164,23 +4215,27 @@ mod tests {
         assert!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().is_some());
         assert!(layout.widgets[2].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Button>().is_some());
 
-        // Check vertical sequence positions
-        assert_eq!(w_label_y, 16.0);
+        // Check vertical sequence positions: the root-plate inset above, a
+        // root-plate gap after each widget.
+        let inset = cce_ui::layout::root_plate_inset();
+        let gap = cce_ui::layout::root_plate_gap();
+        assert_eq!(w_label_y, inset);
         assert_eq!(w_label_h, 18.0);
 
-        assert_eq!(w_check_y, 16.0 + 18.0 + 12.0); // y_prev + h_prev + spacing
+        assert_eq!(w_check_y, inset + 18.0 + gap); // y_prev + h_prev + spacing
         assert_eq!(w_check_h, 22.0);
 
-        assert_eq!(w_btn_y, w_check_y + 22.0 + 12.0);
+        assert_eq!(w_btn_y, w_check_y + 22.0 + gap);
         assert_eq!(w_btn_h, 24.0);
 
-        // Check horizontal positioning (should match usable width: 300 - 2 * 16 = 268)
-        assert_eq!(w_label_x, 16.0);
-        assert_eq!(w_label_w, 268.0);
-        assert_eq!(w_check_x, 16.0);
-        assert_eq!(w_check_w, 268.0);
-        assert_eq!(w_btn_x, 16.0);
-        assert_eq!(w_btn_w, 268.0);
+        // Check horizontal positioning (should match usable width: 300 - 2 * inset)
+        let usable_w = 300.0 - 2.0 * inset;
+        assert_eq!(w_label_x, inset);
+        assert_eq!(w_label_w, usable_w);
+        assert_eq!(w_check_x, inset);
+        assert_eq!(w_check_w, usable_w);
+        assert_eq!(w_btn_x, inset);
+        assert_eq!(w_btn_w, usable_w);
 
         // Verify Checkbox initial state
         assert_eq!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), false);
@@ -4526,7 +4581,6 @@ mod tests {
 impl FuzzelWidget {
     fn own_labels(&self) -> Vec<TextLabel> {
         let mut labels = Vec::new();
-        let pad = PAD;
 
         // Tab titles, centred on their segments. Outside the list clip, like
         // the rest of the chrome.
@@ -4562,7 +4616,7 @@ impl FuzzelWidget {
 
         labels.push(TextLabel {
             text: query_text,
-            x: self.x + pad + 10.0,
+            x: self.text_x(),
             y: self.search_y() + 9.0,
             font_size: 14.0,
             color: query_color,
@@ -4571,7 +4625,7 @@ impl FuzzelWidget {
         if self.filtered_items.is_empty() {
             labels.push(TextLabel {
                 text: "No matches found".to_string(),
-                x: self.x + pad + 10.0,
+                x: self.text_x(),
                 y: self.list_y() + 4.0,
                 font_size: 13.0,
                 color: [0x88, 0x88, 0x99],
@@ -4585,7 +4639,6 @@ impl FuzzelWidget {
     /// in) the viewport. Emitted under the paint walk's list clip, separately
     /// from [`Self::own_labels`], which draws chrome outside it.
     fn row_labels(&self) -> Vec<TextLabel> {
-        let pad = PAD;
         let item_h = ITEM_H;
         let mut labels = Vec::new();
         for (idx, item_text) in self.filtered_items.iter().enumerate() {
@@ -4604,7 +4657,7 @@ impl FuzzelWidget {
                     text: item_text.clone(),
                     // Indented past the icon column whether or not THIS row
                     // resolved an icon — see `icon_gutter`.
-                    x: self.x + pad + 10.0 + self.icon_gutter,
+                    x: self.text_x() + self.icon_gutter,
                     y: draw_y + 4.0,
                     font_size: 13.0,
                     color,

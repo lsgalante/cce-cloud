@@ -11,6 +11,12 @@ use cce_ui::widget::{
 };
 use serde::Deserialize;
 
+/// style: deliberate — how far west of the content inset the panel's paint
+/// clip and text bounds begin, so a child drawn out to its own rect edge (a
+/// label's side bearing, a well's rim) is not cut at the inset. Slack, not a
+/// rung of the spacing ladder.
+const CLIP_SLACK: f32 = 4.0;
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct JsonWidgetConfig {
     #[serde(rename = "type")]
@@ -286,11 +292,13 @@ impl JsonLayoutWidget {
     pub fn layout_children(&mut self) {
         let (bx, by, bw, _) = self.rect();
 
-        let pad_x = 16.0;
-        let usable_w = bw - 2.0 * 16.0;
-        
-        let mut page_current_y = vec![16.0; 16]; // support up to 16 pages
-        let spacing = 12.0;
+        // The widgets stand straight on the popup's root plate: the root-plate
+        // inset from its edge, the root-plate gap between them.
+        let pad_x = cce_ui::layout::root_plate_inset();
+        let usable_w = bw - 2.0 * pad_x;
+
+        let mut page_current_y = vec![pad_x; 16]; // support up to 16 pages
+        let spacing = cce_ui::layout::root_plate_gap();
 
         for i in 0..self.widgets.len() {
             let p_idx = self.widgets[i].page_idx;
@@ -344,10 +352,11 @@ impl JsonLayoutWidget {
             *current_y += w_state.h + if run_continues { 0.0 } else { spacing };
         }
 
-        // Store total height of each page (adding a little padding at the end)
+        // Store total height of each page: the walk left a gap after the last
+        // widget, and what stands below it is the inset, not a gap.
         for (i, &height) in page_current_y.iter().enumerate() {
             if i < self.page_total_heights.len() {
-                self.page_total_heights[i] = height + 4.0;
+                self.page_total_heights[i] = (height - spacing).max(pad_x) + pad_x;
             }
         }
     }
@@ -637,8 +646,10 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         // labels here as well would double them. Page filtering and the panel clip
         // mirror the dissolved `aggregate_quads` bounds.
         let (bx, by, bw, bh) = self.rect();
-        let pad_x = 16.0;
-        let clip = Rect { x: bx + pad_x - 4.0, y: by, width: bw - (pad_x - 4.0), height: bh };
+        let pad_x = cce_ui::layout::root_plate_inset();
+        // style: deliberate — the clip starts CLIP_SLACK west of the content
+        // edge so a child painting out to its rect edge is not cut there.
+        let clip = Rect { x: bx + pad_x - CLIP_SLACK, y: by, width: bw - (pad_x - CLIP_SLACK), height: bh };
 
         // One recess per run of adjacent menu rows, drawn BEFORE the rows so
         // they sit inside it. A menu row draws no plate and no border of its
@@ -757,8 +768,8 @@ impl JsonLayoutWidget {
         let (bx, by, bw, bh) = self.rect();
 
         let active_page = self.active_page;
-        let pad_x = 16.0;
-        let content_bounds = Some([bx + pad_x - 4.0, by, bx + bw, by + bh]);
+        let pad_x = cce_ui::layout::root_plate_inset();
+        let content_bounds = Some([bx + pad_x - CLIP_SLACK, by, bx + bw, by + bh]);
 
         for w in &self.widgets {
             if w.page_idx != active_page {
