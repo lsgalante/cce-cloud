@@ -65,6 +65,19 @@ cce-cloud --daemon                       # run the daemon (normally started by t
 - If the socket connect fails, it falls back to `run_standalone()`: the same UI
   in-process, selection printed directly to stdout.
 
+**The daemon's life is one compositor's.** It holds one Wayland connection for good,
+so it has to notice that connection dying: the wait for the next request dispatches the
+Wayland source alongside the socket listener (a calloop `Generic` on a dup of it), and a
+dispatch error — the compositor gone — is `compositor_gone`, a clean exit with status 0.
+The unit is `PartOf=` / `WantedBy=cce-session.target`, which startcce starts and stops
+with each compositor, so the next session brings up a fresh daemon. Until 2026-09-25 the
+wait was a blocking `accept()` that never read the Wayland socket, and the unit hung off
+`graphical-session.target`, whose stop systemd skipped at one logout (a queued dropbox
+start made the transaction "destructive"): the daemon survived into the next session and
+panicked building its first popup on the dead connection (`No surface formats:
+ERROR_SURFACE_LOST_KHR`). A unit's `[Install]` change needs `systemctl --user reenable
+cce-cloud.service` — `ccebuild install` copies units but does not re-enable them.
+
 The daemon re-parses the forwarded args with the same flag loop as standalone — **flag
 changes must be made in both `run_standalone()` and `run_daemon()`** (and, for the
 needs-stdin decision, in `run_client()`).

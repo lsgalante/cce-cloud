@@ -1462,7 +1462,10 @@ impl State {
         json_layout_config: Option<JsonLayoutConfig>,
         parent_app_id: Option<String>,
         fonts: Option<(FontSystem, SwashCache)>,
-    ) -> (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>) {
+    ) -> Result<
+        (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>),
+        cce_ui::vk::SurfaceLost,
+    > {
         let t_start = std::time::Instant::now();
         cce_ui::scale::set_scale_factor(scale as f32);
         let (width, height) = if mode == LauncherMode::Json {
@@ -1603,15 +1606,16 @@ impl State {
         // stack used. Corner radius 0: the window background tessellates its own
         // rounded corners (rounded_rect_vertices_corners).
         let t = std::time::Instant::now();
+        // Fails only when the connection is already dead under the surface.
         let renderer = unsafe {
-            VkRenderer::new(
+            VkRenderer::try_new(
                 conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
                 wl_surface.id().as_ptr() as *mut std::ffi::c_void,
                 pw,
                 ph,
                 0.0,
             )
-        };
+        }?;
         log::debug!("[timing] VkRenderer::new: {:?}", t.elapsed());
 
         // Reuse the daemon's font system across popups (a rebuild re-scans the
@@ -1787,7 +1791,7 @@ impl State {
         state.upload_vertices();
         log::debug!("[timing] initial layout/upload: {:?}", t.elapsed());
         log::debug!("[timing] State::new total: {:?}", t_start.elapsed());
-        (state, cce_toplevel)
+        Ok((state, cce_toplevel))
     }
 
     fn check_stdin_updates(&mut self) -> bool {
@@ -3263,7 +3267,11 @@ fn run_standalone() {
         json_layout_config,
         parent_app_id,
         None,
-    );
+    )
+    .unwrap_or_else(|lost| {
+        log::error!("cannot open the window: {lost}");
+        std::process::exit(1);
+    });
 
     app.window = state.window.clone();
     app.surface = Some(state.wl_surface.clone());
@@ -3312,7 +3320,10 @@ fn run_standalone() {
         } else {
             std::time::Duration::from_millis(16)
         };
-        event_loop.dispatch(timeout, &mut app).unwrap();
+        if let Err(e) = event_loop.dispatch(timeout, &mut app) {
+            log::error!("compositor connection lost: {e}");
+            std::process::exit(1);
+        }
 
         if app.exit {
             break;
@@ -3448,6 +3459,28 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+/// The compositor this daemon serves has gone: exit, as a Wayland client whose
+/// display went away does.
+///
+/// The daemon holds ONE Wayland connection for its whole life, so it has to
+/// notice when that connection dies. Until 2026-09-25 it did not: between
+/// popups it sat in a blocking `accept()`, never reading the Wayland socket,
+/// and a daemon that outlived a logout kept a connection to a compositor that
+/// no longer existed. The next session's first popup was then built on that
+/// dead connection and the renderer panicked (`No surface formats:
+/// ERROR_SURFACE_LOST_KHR`). The idle wait now dispatches the Wayland source
+/// alongside the listener, so a dead connection surfaces as a dispatch error
+/// the moment the compositor goes; a surface that is lost anyway (the death
+/// raced a request) lands here too.
+///
+/// Status 0, so `Restart=on-failure` does not relaunch it into a session with
+/// no compositor: the unit is bound to `cce-session.target`, which startcce
+/// starts with each compositor, and that start brings up a fresh daemon.
+fn compositor_gone(why: impl std::fmt::Display) -> ! {
+    log::warn!("compositor is gone ({why}); exiting");
+    std::process::exit(0);
+}
+
 fn run_daemon(socket_path: &str) {
     use std::io::{Write, BufRead};
     let _ = std::fs::remove_file(socket_path);
@@ -3471,7 +3504,15 @@ fn run_daemon(socket_path: &str) {
     let _ = cce_ui::widget::get_font_db(); // measure_text's resvg fontdb (system-font scan)
     log::info!("[timing] daemon prewarm: {:?}", t_prewarm.elapsed());
 
-    let conn = Connection::connect_to_env().unwrap();
+    let conn = match Connection::connect_to_env() {
+        Ok(conn) => conn,
+        Err(e) => {
+            // A failure status, so systemd's Restart=on-failure tries again
+            // if the session is still starting up.
+            log::error!("cannot connect to the compositor: {e}");
+            std::process::exit(1);
+        }
+    };
     let conn_clone = conn.clone();
     let (globals, mut event_queue) = registry_queue_init(&conn).unwrap();
     let qh = event_queue.handle();
@@ -3514,18 +3555,36 @@ fn run_daemon(socket_path: &str) {
     let mut event_loop = calloop::EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
+    // The listener wakes the loop too, so waiting for the next request also
+    // reads the Wayland connection — see `compositor_gone`. The callback does
+    // nothing: the accept after each dispatch takes the connection.
+    let listener_wake = listener.try_clone().expect("dup the daemon socket");
+    loop_handle
+        .insert_source(
+            calloop::generic::Generic::new(
+                listener_wake,
+                calloop::Interest::READ,
+                calloop::Mode::Level,
+            ),
+            |_, _, _| Ok(calloop::PostAction::Continue),
+        )
+        .unwrap();
+    let _ = listener.set_nonblocking(true);
 
     let mut pending: Option<std::os::unix::net::UnixStream> = None;
     loop {
         let mut stream = match pending.take() {
             Some(s) => s,
-            None => {
-                let _ = listener.set_nonblocking(false);
-                match listener.accept() {
-                    Ok((s, _)) => s,
-                    Err(_) => continue,
+            None => match listener.accept() {
+                Ok((s, _)) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if let Err(e) = event_loop.dispatch(None, &mut app) {
+                        compositor_gone(e);
+                    }
+                    continue;
                 }
-            }
+                Err(_) => continue,
+            },
         };
 
         let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
@@ -3759,7 +3818,7 @@ fn run_daemon(socket_path: &str) {
         app.switcher_mode = switcher_mode;
         app.selected_item = None;
 
-        let (state, cce_toplevel) = State::new(
+        let (state, cce_toplevel) = match State::new(
             &conn_clone,
             &qh,
             &app.compositor_state,
@@ -3780,7 +3839,13 @@ fn run_daemon(socket_path: &str) {
             json_layout_config,
             parent_app_id,
             fonts_slot.take(),
-        );
+        ) {
+            Ok(made) => made,
+            Err(lost) => {
+                let _ = stream.write_all(b"\n");
+                compositor_gone(lost);
+            }
+        };
 
         app.window = state.window.clone();
         app.surface = Some(state.wl_surface.clone());
@@ -3794,9 +3859,6 @@ fn run_daemon(socket_path: &str) {
         // point; the initial_stdin items are already sitting in stdin_state,
         // so fire one signal to make the channel handler ingest them.
         let _ = stdin_sender.send(());
-
-        // Watch for preempting connections while the popup is open.
-        let _ = listener.set_nonblocking(true);
 
         log::debug!("[timing] request -> popup ready: {:?}", t_request.elapsed());
         let mut first_frame_logged = false;
@@ -3816,7 +3878,10 @@ fn run_daemon(socket_path: &str) {
             } else {
                 std::time::Duration::from_millis(16)
             };
-            event_loop.dispatch(timeout, &mut app).unwrap();
+            if let Err(e) = event_loop.dispatch(timeout, &mut app) {
+                let _ = stream.write_all(b"\n");
+                compositor_gone(e);
+            }
 
             if app.exit {
                 break;

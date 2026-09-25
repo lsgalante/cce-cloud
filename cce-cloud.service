@@ -1,7 +1,15 @@
 [Unit]
 Description=CCE Cloud Menu Daemon
-After=graphical-session.target
-PartOf=graphical-session.target
+# Bound to ONE compositor's life, like cce-grid: startcce starts
+# cce-session.target after the compositor is up and stops it when it exits.
+# It was graphical-session.target until 2026-09-25, which does not reliably
+# stop at logout (a queued start job elsewhere, dropbox's, made the stop
+# transaction "destructive" and systemd skipped it), so the daemon outlived
+# the compositor, still holding its dead Wayland connection, and panicked
+# on the next session's first popup. After changing [Install], re-enable:
+# `systemctl --user reenable cce-cloud.service`.
+After=cce-session.target
+PartOf=cce-session.target
 
 [Service]
 Type=simple
@@ -25,4 +33,4 @@ Environment=RUST_LOG=info
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=cce-session.target
