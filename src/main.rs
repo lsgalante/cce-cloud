@@ -1616,7 +1616,7 @@ impl State {
                 0.0,
             )
         }?;
-        log::debug!("[timing] VkRenderer::new: {:?}", t.elapsed());
+        log::debug!("[timing] VkRenderer::try_new: {:?}", t.elapsed());
 
         // Reuse the daemon's font system across popups (a rebuild re-scans the
         // fonts dir and loses the shaping caches).
