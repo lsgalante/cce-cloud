@@ -98,9 +98,10 @@ needs-stdin decision, in `run_client()`).
   edge. Apps and the Super-Tab switcher are the only lists with icons: other
   Dmenu/Path items are arbitrary strings with nothing to look up, and their
   gutter stays 0. The switcher's rows are the compositor's `Title (app_id)`
-  lines; `switcher_app_id` reads the id back out of the row (the row itself is
-  left as sent, since the compositor maps the echoed text back to a window) and
-  `desktop_icon_index` maps it to a `.desktop` entry's `Icon=` by file stem,
+  lines; `split_switcher_row` splits one into title and id. The row text itself
+  is left as sent, since the compositor maps the echoed text back to a window —
+  only the drawn and measured label drops the suffix (`row_label`), so typing
+  an app_id still filters. `desktop_icon_index` maps the id to a `.desktop` entry's `Icon=` by file stem,
   `StartupWMClass`, or last reverse-DNS component, falling back to the app_id
   itself, which is the name cce's own apps install their icons under. The rows
   stream in over stdin, so `resolve_switcher_icons` runs on each ingest.

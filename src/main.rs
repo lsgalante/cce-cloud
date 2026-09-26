@@ -408,16 +408,17 @@ fn scan_apps() -> Vec<AppInfo> {
     apps
 }
 
-/// The app_id in a Super-Tab switcher row. The compositor
+/// A Super-Tab switcher row split into `(title, app_id)`. The compositor
 /// (`launch_window_switcher` in cce-compositor's window_manager.rs) writes each
-/// window as `Title (app_id)`, or the bare app_id when the title is empty, and
-/// maps the echoed row back to a window by its whole text — so the row is left
-/// as sent and the id is only read back out of it here. The LAST parenthesised
-/// group is the id: a title may carry parentheses of its own.
-fn switcher_app_id(item: &str) -> &str {
+/// window as `Title (app_id)`, or the bare app_id when the title is empty —
+/// which is then both halves. It maps the echoed row back to a window by its
+/// whole text, so the row itself is left as sent: the title is only what is
+/// drawn, and the id is only what the icon is looked up by. The LAST
+/// parenthesised group is the id: a title may carry parentheses of its own.
+fn split_switcher_row(item: &str) -> (&str, &str) {
     item.strip_suffix(')')
-        .and_then(|rest| rest.rfind(" (").map(|i| &rest[i + 2..]))
-        .unwrap_or(item)
+        .and_then(|rest| rest.rfind(" (").map(|i| (&rest[..i], &rest[i + 2..])))
+        .unwrap_or((item, item))
 }
 
 /// app_id → `Icon=` value, from every `.desktop` file on the search path.
@@ -750,6 +751,10 @@ pub struct FuzzelWidget {
     /// every row, not just the ones that resolved, so a list with one missing
     /// icon keeps a straight text edge instead of ragging in and out.
     icon_gutter: f32,
+    /// Rows are the window switcher's `Title (app_id)` lines: draw only the
+    /// title (see [`split_switcher_row`]). The item text — what filtering
+    /// matches and what a selection echoes back — keeps the suffix.
+    pub switcher_rows: bool,
     /// Row under the pointer, by filtered index — the hover wash and the
     /// brighter label. Distinct from `selected`: hovering never moves the
     /// keyboard selection, only a click does.
@@ -821,6 +826,7 @@ impl FuzzelWidget {
             selected: 0,
             icons: std::collections::HashMap::new(),
             icon_gutter: 0.0,
+            switcher_rows: false,
             hovered: None,
             cursor: None,
             // Designer raise/sink treatment: the bar idles sunk under the
@@ -1017,6 +1023,16 @@ impl FuzzelWidget {
 
     pub fn has_item_icon(&self, item: &str) -> bool {
         self.icons.contains_key(item)
+    }
+
+    /// What a row draws for `item` — the item itself, except for the window
+    /// switcher's rows (see `switcher_rows`).
+    pub fn row_label<'a>(&self, item: &'a str) -> &'a str {
+        if self.switcher_rows {
+            split_switcher_row(item).0
+        } else {
+            item
+        }
     }
 
     /// The square an icon is fitted into for the row drawn at `draw_y`.
@@ -1720,6 +1736,7 @@ impl State {
 
         let mut fuzzel = FuzzelWidget::new(prompt);
         fuzzel.set_rect(0.0, 0.0, lw, lh);
+        fuzzel.switcher_rows = switcher_mode;
 
         let stdin_state = Arc::new(Mutex::new(StdinState {
             items: Vec::new(),
@@ -1963,7 +1980,7 @@ impl State {
         let icons: Vec<(String, (u32, u32, u32))> = new
             .into_iter()
             .filter_map(|item| {
-                let name = icon_name_for_app_id(index, switcher_app_id(item));
+                let name = icon_name_for_app_id(index, split_switcher_row(item).1);
                 let img = cce_ui::icon::upload_themed(&name, ICON_PX.ceil() as u32 * 2)?;
                 Some((item.clone(), img))
             })
@@ -2021,7 +2038,8 @@ impl State {
             }
         } else {
             for item in &self.fuzzel.filtered_items {
-                let buf = make_text_buffer(&mut self.font_system, item, 13.0);
+                let label = self.fuzzel.row_label(item);
+                let buf = make_text_buffer(&mut self.font_system, label, 13.0);
                 let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
                 if tw > max_text_w {
                     max_text_w = tw;
@@ -4552,12 +4570,15 @@ mod tests {
     }
 
     #[test]
-    fn switcher_rows_yield_their_app_id() {
-        assert_eq!(switcher_app_id("~/src - Terminal (cce-terminal)"), "cce-terminal");
+    fn switcher_rows_split_into_title_and_app_id() {
+        assert_eq!(split_switcher_row("~/src - Terminal (cce-terminal)"), ("~/src - Terminal", "cce-terminal"));
         // The last group is the id; the title's own parentheses are not.
-        assert_eq!(switcher_app_id("Inbox (3) - Mail (org.gnome.Evolution)"), "org.gnome.Evolution");
-        // An untitled window is sent as the bare app_id.
-        assert_eq!(switcher_app_id("firefox"), "firefox");
+        assert_eq!(
+            split_switcher_row("Inbox (3) - Mail (org.gnome.Evolution)"),
+            ("Inbox (3) - Mail", "org.gnome.Evolution")
+        );
+        // An untitled window is sent as the bare app_id, which is both halves.
+        assert_eq!(split_switcher_row("firefox"), ("firefox", "firefox"));
     }
 
     #[test]
@@ -4891,7 +4912,7 @@ impl FuzzelWidget {
                 };
 
                 labels.push(TextLabel {
-                    text: item_text.clone(),
+                    text: self.row_label(item_text).to_string(),
                     // Indented past the icon column whether or not THIS row
                     // resolved an icon — see `icon_gutter`.
                     x: self.text_x() + self.icon_gutter,
