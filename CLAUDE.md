@@ -93,7 +93,8 @@ needs-stdin decision, in `run_client()`).
   `Exec` (spawn output logged to `$XDG_RUNTIME_DIR/cce/spawn.log`, via
   `cce_ui::config::cce_runtime_dir()` — it was `/tmp/cce-spawn.log` before
   2026-08-22). Every launch (`spawn_detached`) runs in **its own transient
-  scope**, `app-cce\x2dcloud-<name>-<n>.scope` in app.slice, `PartOf=`
+  scope**, `app-cce\x2dcloud-<app>-<n>.scope` in app.slice — `<app>` the
+  program the launch runs, not the `sh -c` wrapping it (`launch_name`) — `PartOf=`
   `cce-session.target` (`scope_argv`, through `systemd-run --scope`): a daemon
   restart never reaches it, and the session's end stops it. Until 2026-09-26
   launches stayed in cce-cloud.service's own cgroup, where `KillMode=process`

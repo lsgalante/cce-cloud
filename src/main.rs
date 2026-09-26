@@ -653,16 +653,39 @@ fn scope_name_part(program: &str) -> String {
     if part.is_empty() { "app".to_string() } else { part }
 }
 
+/// The program a launch actually runs, for naming its scope. Every desktop
+/// entry goes through `sh -c <Exec>` (a terminal-hosted one through
+/// `<terminal> sh -c "exec <Exec>"`), so naming the scope after `program`
+/// called every one of them `sh`: the first word of the shell command is
+/// the app, past a leading `exec`, `env` and `VAR=value` assignments.
+fn launch_name(program: &str, args: &[&str]) -> String {
+    let shell_cmd = args
+        .windows(2)
+        .position(|w| w[0] == "-c")
+        .filter(|&i| i == 0 || matches!(scope_name_part(args[i - 1]).as_str(), "sh" | "bash"))
+        .filter(|&i| i > 0 || matches!(scope_name_part(program).as_str(), "sh" | "bash"))
+        .map(|i| args[i + 1]);
+    let Some(cmd) = shell_cmd else {
+        return program.to_string();
+    };
+    cmd.split_whitespace()
+        .map(|w| w.trim_matches(|c| c == '\'' || c == '"'))
+        .find(|w| !w.is_empty() && *w != "exec" && *w != "env" && !w.contains('='))
+        .unwrap_or(program)
+        .to_string()
+}
+
 /// `systemd-run` arguments that start `program args` in its own transient
-/// scope, `app-cce\x2dcloud-<name>-<n>.scope` in app.slice, `PartOf` the
-/// session target. `n` only has to make the name unique.
+/// scope, `app-cce\x2dcloud-<app>-<n>.scope` in app.slice, `PartOf` the
+/// session target, named after the app it runs (`launch_name`). `n` only
+/// has to make the name unique.
 fn scope_argv(program: &str, args: &[&str], n: u128) -> Vec<String> {
     let mut argv = vec![
         "--user".to_string(),
         "--scope".to_string(),
         "--collect".to_string(),
         "--slice=app.slice".to_string(),
-        format!("--unit=app-cce\\x2dcloud-{}-{n}", scope_name_part(program)),
+        format!("--unit=app-cce\\x2dcloud-{}-{n}", scope_name_part(&launch_name(program, args))),
         format!("--property=PartOf={SESSION_TARGET}"),
         "--".to_string(),
         program.to_string(),
@@ -4991,7 +5014,7 @@ mod scope_tests {
                 "--scope",
                 "--collect",
                 "--slice=app.slice",
-                "--unit=app-cce\\x2dcloud-sh-7",
+                "--unit=app-cce\\x2dcloud-cce-files-7",
                 "--property=PartOf=cce-session.target",
                 "--",
                 "/usr/bin/sh",
@@ -4999,6 +5022,19 @@ mod scope_tests {
                 "exec cce-files",
             ]
         );
+    }
+
+    #[test]
+    fn a_scope_is_named_after_the_app_not_the_shell() {
+        assert_eq!(launch_name("sh", &["-c", "cce-mail"]), "cce-mail");
+        assert_eq!(launch_name("sh", &["-c", "/opt/google/chrome/chrome %U"]), "/opt/google/chrome/chrome");
+        assert_eq!(launch_name("sh", &["-c", "env GDK_SCALE=1 inkscape"]), "inkscape");
+        assert_eq!(launch_name("sh", &["-c", "FOO=1 exec 'cce-files'"]), "cce-files");
+        // A terminal-hosted entry: the app inside the terminal.
+        assert_eq!(launch_name("foot", &["sh", "-c", "exec htop"]), "htop");
+        // Not a shell command: the program itself.
+        assert_eq!(launch_name("ccectl", &["close"]), "ccectl");
+        assert_eq!(scope_name_part(&launch_name("sh", &["-c", "/opt/1Password/1password"])), "1password");
     }
 
     #[test]
