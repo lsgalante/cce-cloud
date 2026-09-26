@@ -10,7 +10,7 @@ JSON-defined popup panel — all in one binary. It is one crate of the cce multi
 workspace; workspace-wide conventions (multi-repo layout, no `[workspace.dependencies]`,
 shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that too.
 
-Two source files, all logic in `src/main.rs` (~4.6k lines):
+Two source files, all logic in `src/main.rs` (~5.1k lines):
 
 - `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland
   surface and event loop, `FuzzelWidget` (the list UI: keyboard selection chip,
@@ -88,6 +88,14 @@ needs-stdin decision, in `run_client()`).
   `__cce_switcher_next__` / `__cce_switcher_select_and_close__` drive the compositor's
   window switcher (`--switcher` starts in Dmenu with Super held).
 - `Path` — executables scanned from `$PATH`.
+**Key repeat** is the client's job on Wayland: the keyboard is bound with
+`get_keyboard_with_repeat` on the calloop loop, which re-fires a held key at
+the compositor's `repeat_info` rate into `repeat_key`. Only text, deletion
+and cursor/list movement repeat (`key_repeats`); Return, Escape and Tab do
+not. The loop is created BEFORE `AppState` on both paths, because the first
+roundtrip is when the seat announces its keyboard. Until 2026-09-26 it was
+bound with plain `get_keyboard`, and a held Backspace deleted one character.
+
 - `Apps` — `.desktop` files from the standard application dirs, sorted by launch
   frecency persisted in `~/.cache/cce-cloud-apps.json`; selecting spawns the app's
   `Exec` (spawn output logged to `$XDG_RUNTIME_DIR/cce/spawn.log`, via

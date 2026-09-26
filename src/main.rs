@@ -636,6 +636,19 @@ fn command_in_path(cmd: &str) -> bool {
     })
 }
 
+/// Whether holding this key should repeat it: text, deletion and cursor or
+/// list movement. Not Return, Escape or Tab — a held Return would launch the
+/// selection again and again, a held Escape has nothing left to close.
+fn key_repeats(keysym: xkeysym::Keysym, utf8: Option<&str>) -> bool {
+    use xkeysym::Keysym as K;
+    match keysym {
+        K::BackSpace | K::Delete | K::KP_Delete | K::Left | K::Right | K::Up | K::Down
+        | K::KP_Left | K::KP_Right | K::KP_Up | K::KP_Down | K::Page_Up | K::Page_Down => true,
+        K::Return | K::KP_Enter | K::Escape | K::Tab | K::ISO_Left_Tab => false,
+        _ => utf8.is_some_and(|t| !t.is_empty() && !t.chars().any(char::is_control)),
+    }
+}
+
 /// The session target a launched app's scope is `PartOf`: startcce starts it
 /// once the compositor is up and stops it when the compositor exits (see
 /// cce-cloud.service).
@@ -2377,6 +2390,9 @@ struct AppState {
     fade_until: Option<std::time::Instant>,
     cce_toplevel: Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>,
     selected_item: Option<String>,
+    /// The event loop, for the keyboard's repeat timer. Set before the first
+    /// roundtrip, since that is when the seat announces its keyboard.
+    loop_handle: calloop::LoopHandle<'static, AppState>,
 }
 
 impl AppState {
@@ -2528,9 +2544,19 @@ impl SeatHandler for AppState {
             self.pointer = Some(pointer);
         }
         if capability == Capability::Keyboard && self.keyboard.is_none() {
+            // With repeat: held keys re-fire at the compositor's
+            // repeat_info rate (see `repeat_key`). Plain `get_keyboard` has
+            // no repeat at all, which is how holding Backspace in the search
+            // field deleted one character (until 2026-09-26).
             let keyboard = self
                 .seat_state
-                .get_keyboard(qh, &seat, None)
+                .get_keyboard_with_repeat(
+                    qh,
+                    &seat,
+                    None,
+                    self.loop_handle.clone(),
+                    Box::new(|state: &mut AppState, _keyboard, event| state.repeat_key(event)),
+                )
                 .unwrap();
             self.keyboard = Some(keyboard);
         }
@@ -3132,6 +3158,14 @@ impl wayland_client::Dispatch<cce_ui::protocol::cce_window_management_v1::zcce_t
 }
 
 impl AppState {
+    /// A held key's repeat: fed back in as another press, but only for keys
+    /// where a repeat means more of the same (`key_repeats`).
+    fn repeat_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent) {
+        if key_repeats(event.keysym, event.utf8.as_deref()) {
+            self.handle_key(event, cce_ui::widget::ElementState::Pressed);
+        }
+    }
+
     fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: cce_ui::widget::ElementState) {
         use cce_ui::widget::{Key, NamedKey};
         if state != cce_ui::widget::ElementState::Pressed {
@@ -3429,6 +3463,10 @@ fn run_standalone() {
 
     let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
 
+    // Before the app state: the roundtrip below delivers the seat's keyboard,
+    // and binding it with key repeat needs the loop.
+    let mut event_loop = calloop::EventLoop::try_new().unwrap();
+
     let mut app = AppState {
         registry_state: RegistryState::new(&globals),
         compositor_state,
@@ -3450,6 +3488,7 @@ fn run_standalone() {
         fade_until: None,
         cce_toplevel: None,
         selected_item: None,
+        loop_handle: event_loop.handle(),
     };
 
     // Perform a roundtrip to populate output_state with active output scales
@@ -3493,7 +3532,6 @@ fn run_standalone() {
     app.cce_toplevel = cce_toplevel;
     app.state = Some(state);
 
-    let mut event_loop = calloop::EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
 
     WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
@@ -3739,6 +3777,10 @@ fn run_daemon(socket_path: &str) {
     let output_state = OutputState::new(&globals, &qh);
     let cce_wm = globals.bind::<cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1, _, _>(&qh, 2..=4, ()).ok();
 
+    // Before the app state: the roundtrip below delivers the seat's keyboard,
+    // and binding it with key repeat needs the loop.
+    let mut event_loop = calloop::EventLoop::try_new().unwrap();
+
     let mut app = AppState {
         registry_state: RegistryState::new(&globals),
         compositor_state,
@@ -3760,6 +3802,7 @@ fn run_daemon(socket_path: &str) {
         fade_until: None,
         cce_toplevel: None,
         selected_item: None,
+        loop_handle: event_loop.handle(),
     };
 
     event_queue.roundtrip(&mut app).unwrap();
@@ -3767,7 +3810,6 @@ fn run_daemon(socket_path: &str) {
     let scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
     let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
 
-    let mut event_loop = calloop::EventLoop::try_new().unwrap();
     let loop_handle = event_loop.handle();
     WaylandSource::new(conn, event_queue).insert(loop_handle.clone()).unwrap();
     // The listener wakes the loop too, so waiting for the next request also
@@ -5043,5 +5085,23 @@ mod scope_tests {
         assert_eq!(scope_name_part("/opt/1Password/1password"), "1password");
         assert_eq!(scope_name_part("my app.bin"), "my_app_bin");
         assert_eq!(scope_name_part(""), "app");
+    }
+}
+
+#[cfg(test)]
+mod repeat_tests {
+    use super::key_repeats;
+    use xkeysym::Keysym as K;
+
+    #[test]
+    fn text_deletion_and_movement_repeat_but_commits_do_not() {
+        assert!(key_repeats(K::a, Some("a")));
+        assert!(key_repeats(K::BackSpace, Some("\u{8}")));
+        assert!(key_repeats(K::Down, None));
+        assert!(!key_repeats(K::Return, Some("\r")));
+        assert!(!key_repeats(K::Escape, Some("\u{1b}")));
+        assert!(!key_repeats(K::Tab, Some("\t")));
+        // A modifier or dead key carries no text: nothing to repeat.
+        assert!(!key_repeats(K::Shift_L, None));
     }
 }
