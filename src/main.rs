@@ -340,11 +340,11 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
     None
 }
 
-fn scan_apps() -> Vec<AppInfo> {
-    let mut apps = Vec::new();
-    // XDG precedence: $XDG_DATA_HOME first, then each $XDG_DATA_DIRS entry in
-    // order (defaults per the base-directory spec). Honoring XDG_DATA_DIRS is
-    // what makes Flatpak/Snap exports visible.
+/// The `applications/` dirs `.desktop` files are read from, in XDG precedence:
+/// $XDG_DATA_HOME first, then each $XDG_DATA_DIRS entry in order (defaults per
+/// the base-directory spec). Honoring XDG_DATA_DIRS is what makes Flatpak/Snap
+/// exports visible.
+fn application_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     let data_home = std::env::var("XDG_DATA_HOME")
         .ok()
@@ -367,6 +367,12 @@ fn scan_apps() -> Vec<AppInfo> {
             dirs.push(dir.join("applications"));
         }
     }
+    dirs
+}
+
+fn scan_apps() -> Vec<AppInfo> {
+    let mut apps = Vec::new();
+    let dirs = application_dirs();
 
     // The first file claiming a desktop-file ID (the file stem) shadows that
     // ID in every later dir — even when the winning entry is itself
@@ -400,6 +406,77 @@ fn scan_apps() -> Vec<AppInfo> {
     apps.sort_by(|a, b| a.name.cmp(&b.name));
     apps.dedup_by(|a, b| a.name == b.name);
     apps
+}
+
+/// The app_id in a Super-Tab switcher row. The compositor
+/// (`launch_window_switcher` in cce-compositor's window_manager.rs) writes each
+/// window as `Title (app_id)`, or the bare app_id when the title is empty, and
+/// maps the echoed row back to a window by its whole text — so the row is left
+/// as sent and the id is only read back out of it here. The LAST parenthesised
+/// group is the id: a title may carry parentheses of its own.
+fn switcher_app_id(item: &str) -> &str {
+    item.strip_suffix(')')
+        .and_then(|rest| rest.rfind(" (").map(|i| &rest[i + 2..]))
+        .unwrap_or(item)
+}
+
+/// app_id → `Icon=` value, from every `.desktop` file on the search path.
+///
+/// A window's app_id is not an icon name, but by convention it names its
+/// desktop entry: the file stem (`org.gnome.Nautilus`), or `StartupWMClass`
+/// for the apps whose id doesn't match their file. Keys are lowercased — ids in
+/// the wild disagree with their entries on case (`firefox` / `Firefox`) — and
+/// the last reverse-DNS component is indexed too, so `org.gnome.Nautilus`
+/// matches a window that reports plain `nautilus`. Unlike [`scan_apps`] this
+/// keeps NoDisplay entries: a helper window is still a window with an icon.
+fn desktop_icon_index(dirs: &[std::path::PathBuf]) -> std::collections::HashMap<String, String> {
+    let mut index = std::collections::HashMap::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(true, |ext| ext != "desktop") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let mut in_entry = false;
+            let mut icon = None;
+            let mut wm_class = None;
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('[') {
+                    in_entry = line == "[Desktop Entry]";
+                } else if in_entry {
+                    if let Some(v) = line.strip_prefix("Icon=") {
+                        icon.get_or_insert(v.trim().to_string());
+                    } else if let Some(v) = line.strip_prefix("StartupWMClass=") {
+                        wm_class.get_or_insert(v.trim().to_lowercase());
+                    }
+                }
+            }
+            let Some(icon) = icon.filter(|i| !i.is_empty()) else { continue };
+            let stem = stem.to_lowercase();
+            let short = stem.rsplit('.').next().map(str::to_string);
+            // First claim wins, in XDG precedence — the same shadowing
+            // [`scan_apps`] applies to desktop-file IDs.
+            for key in [Some(stem), wm_class, short].into_iter().flatten() {
+                index.entry(key).or_insert_with(|| icon.clone());
+            }
+        }
+    }
+    index
+}
+
+/// The icon name to draw for a window with this app_id: its desktop entry's
+/// `Icon=`, else the app_id itself, which is what apps without an entry (and
+/// cce's own clients, whose icons are installed under their app_id) name their
+/// icon after.
+fn icon_name_for_app_id(index: &std::collections::HashMap<String, String>, app_id: &str) -> String {
+    index
+        .get(&app_id.to_lowercase())
+        .cloned()
+        .unwrap_or_else(|| app_id.to_string())
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
@@ -921,12 +998,25 @@ impl FuzzelWidget {
         self.icon_gutter = if any { ICON_PX + cce_ui::layout::CONTROL_TEXT_INSET } else { 0.0 };
     }
 
-    /// Give rows an icon column. Only Apps mode calls this — Dmenu/Path items
-    /// are arbitrary strings with nothing to look an icon up by, and they keep
-    /// the flush-left layout they have always had because the gutter stays 0.
+    /// Give rows an icon column. Apps mode sets its whole map here; the
+    /// window switcher adds to it through [`Self::extend_item_icons`]. Other
+    /// Dmenu and Path items are arbitrary strings with nothing to look an icon
+    /// up by, and they keep the flush-left layout they have always had because
+    /// the gutter stays 0.
     pub fn set_item_icons(&mut self, icons: std::collections::HashMap<String, (u32, u32, u32)>) {
         self.icons = icons;
         self.recompute_icon_gutter();
+    }
+
+    /// Add icons for rows that arrived after the map was set — the window
+    /// switcher's rows stream in over stdin.
+    pub fn extend_item_icons(&mut self, icons: impl IntoIterator<Item = (String, (u32, u32, u32))>) {
+        self.icons.extend(icons);
+        self.recompute_icon_gutter();
+    }
+
+    pub fn has_item_icon(&self, item: &str) -> bool {
+        self.icons.contains_key(item)
     }
 
     /// The square an icon is fitted into for the row drawn at `draw_y`.
@@ -1398,6 +1488,9 @@ struct State {
     max_height: u32,
     select_item: Option<String>,
     switcher_mode: bool,
+    /// app_id → icon name for the switcher's rows ([`desktop_icon_index`]),
+    /// built on the first row that needs it and kept for the popup's life.
+    switcher_icon_index: Option<std::collections::HashMap<String, String>>,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
     /// Dissolved root plate container (Phase 6as): the plate was a pure value-holder for the
@@ -1772,6 +1865,7 @@ impl State {
             },
             select_item,
             switcher_mode,
+            switcher_icon_index: None,
             last_tick: std::time::Instant::now(),
             ui_context: cce_ui::context::UiContext::new(),
             window_rect,
@@ -1815,6 +1909,10 @@ impl State {
                 // ever fills the mode's own list, and comparing against
                 // whatever tab the user is reading would differ every time.
                 if self.fuzzel.tab_items(0) != items.as_slice() {
+                    if self.switcher_mode {
+                        // Fields, not `self`: the stdin lock guard borrows it.
+                        Self::resolve_switcher_icons(&mut self.fuzzel, &mut self.switcher_icon_index, &items);
+                    }
                     self.fuzzel.set_tab_items(0, items);
                     changed = true;
                     if let Some(ref select_name) = self.select_item {
@@ -1846,6 +1944,31 @@ impl State {
             }
         }
         false
+    }
+
+    /// Give the switcher's window rows their app's icon. Rows stream in over
+    /// stdin, so this runs per ingest and only resolves the rows that don't
+    /// have an icon yet. Uploads are per-popup for the same reason as Apps
+    /// mode's (see `State::new`). `index` is `State::switcher_icon_index`.
+    fn resolve_switcher_icons(
+        fuzzel: &mut FuzzelWidget,
+        index: &mut Option<std::collections::HashMap<String, String>>,
+        items: &[String],
+    ) {
+        let new: Vec<&String> = items.iter().filter(|i| !fuzzel.has_item_icon(i)).collect();
+        if new.is_empty() {
+            return;
+        }
+        let index = index.get_or_insert_with(|| desktop_icon_index(&application_dirs()));
+        let icons: Vec<(String, (u32, u32, u32))> = new
+            .into_iter()
+            .filter_map(|item| {
+                let name = icon_name_for_app_id(index, switcher_app_id(item));
+                let img = cce_ui::icon::upload_themed(&name, ICON_PX.ceil() as u32 * 2)?;
+                Some((item.clone(), img))
+            })
+            .collect();
+        fuzzel.extend_item_icons(icons);
     }
 
     fn update_desired_size(&mut self) {
@@ -1927,7 +2050,7 @@ impl State {
         }
 
         let scrollbar_w = if needed_height > self.max_height as f32 { 10.0 } else { 0.0 };
-        let needed_width = max_text_w + self.fuzzel.chrome_w() + scrollbar_w;
+        let needed_width = max_text_w + self.fuzzel.chrome_w() + self.fuzzel.icon_gutter + scrollbar_w;
         let target_width = needed_width.clamp(300.0, self.max_width as f32);
 
         self.resize_window(target_width.round() as u32, target_height.round() as u32);
@@ -4426,6 +4549,55 @@ mod tests {
         assert!(!app.terminal);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn switcher_rows_yield_their_app_id() {
+        assert_eq!(switcher_app_id("~/src - Terminal (cce-terminal)"), "cce-terminal");
+        // The last group is the id; the title's own parentheses are not.
+        assert_eq!(switcher_app_id("Inbox (3) - Mail (org.gnome.Evolution)"), "org.gnome.Evolution");
+        // An untitled window is sent as the bare app_id.
+        assert_eq!(switcher_app_id("firefox"), "firefox");
+    }
+
+    #[test]
+    fn app_ids_resolve_through_their_desktop_entry() {
+        let base = std::path::PathBuf::from("/tmp/cce-cloud-test-icon-index");
+        let _ = std::fs::remove_dir_all(&base);
+        let user = base.join("user");
+        let sys = base.join("sys");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::write(
+            sys.join("org.gnome.Nautilus.desktop"),
+            "[Desktop Entry]\nName=Files\nIcon=org.gnome.Nautilus\n",
+        )
+        .unwrap();
+        std::fs::write(
+            sys.join("code-oss.desktop"),
+            "[Desktop Entry]\nName=Code\nIcon=com.visualstudio.code.oss\nStartupWMClass=Code - OSS\n",
+        )
+        .unwrap();
+        // NoDisplay helpers still name an icon for their windows.
+        std::fs::write(
+            sys.join("helper.desktop"),
+            "[Desktop Entry]\nName=Helper\nIcon=helper-icon\nNoDisplay=true\n\n[Desktop Action x]\nIcon=wrong\n",
+        )
+        .unwrap();
+        // The user dir shadows the system entry's icon.
+        std::fs::write(sys.join("editor.desktop"), "[Desktop Entry]\nIcon=editor-sys\n").unwrap();
+        std::fs::write(user.join("editor.desktop"), "[Desktop Entry]\nIcon=editor-user\n").unwrap();
+
+        let index = desktop_icon_index(&[user, sys]);
+        let icon = |id| icon_name_for_app_id(&index, id);
+        assert_eq!(icon("org.gnome.Nautilus"), "org.gnome.Nautilus");
+        assert_eq!(icon("nautilus"), "org.gnome.Nautilus");
+        assert_eq!(icon("Code - OSS"), "com.visualstudio.code.oss");
+        assert_eq!(icon("helper"), "helper-icon");
+        assert_eq!(icon("editor"), "editor-user");
+        // No entry: the app_id is the icon name, as it is for cce's own apps.
+        assert_eq!(icon("cce-terminal"), "cce-terminal");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -95,8 +95,15 @@ needs-stdin decision, in `run_client()`).
   2026-08-22). Each entry's `Icon=` is
   resolved through `cce_ui::icon` and drawn in a gutter left of the label — the
   gutter is applied to every row, so one unresolvable icon doesn't rag the text
-  edge. This is the *only* mode with icons: Dmenu/Path items are arbitrary
-  strings with nothing to look up, and `set_item_icons` leaves their gutter at 0.
+  edge. Apps and the Super-Tab switcher are the only lists with icons: other
+  Dmenu/Path items are arbitrary strings with nothing to look up, and their
+  gutter stays 0. The switcher's rows are the compositor's `Title (app_id)`
+  lines; `switcher_app_id` reads the id back out of the row (the row itself is
+  left as sent, since the compositor maps the echoed text back to a window) and
+  `desktop_icon_index` maps it to a `.desktop` entry's `Icon=` by file stem,
+  `StartupWMClass`, or last reverse-DNS component, falling back to the app_id
+  itself, which is the name cce's own apps install their icons under. The rows
+  stream in over stdin, so `resolve_switcher_icons` runs on each ingest.
   Icons are uploaded per popup on purpose (`cce_ui::icon::upload_themed` caches
   the decode, not the image id) because `Drop` destroys this app's `VkRenderer`
   between popups and an id cached across them would name freed GPU resources.
