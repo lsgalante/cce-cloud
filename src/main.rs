@@ -636,15 +636,66 @@ fn command_in_path(cmd: &str) -> bool {
     })
 }
 
+/// The session target a launched app's scope is `PartOf`: startcce starts it
+/// once the compositor is up and stops it when the compositor exits (see
+/// cce-cloud.service).
+const SESSION_TARGET: &str = "cce-session.target";
+
+/// A systemd unit-name fragment for `program`: its file name, reduced to the
+/// characters a unit name may hold.
+fn scope_name_part(program: &str) -> String {
+    let base = program.rsplit('/').next().unwrap_or(program);
+    let part: String = base
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .take(40)
+        .collect();
+    if part.is_empty() { "app".to_string() } else { part }
+}
+
+/// `systemd-run` arguments that start `program args` in its own transient
+/// scope, `app-cce\x2dcloud-<name>-<n>.scope` in app.slice, `PartOf` the
+/// session target. `n` only has to make the name unique.
+fn scope_argv(program: &str, args: &[&str], n: u128) -> Vec<String> {
+    let mut argv = vec![
+        "--user".to_string(),
+        "--scope".to_string(),
+        "--collect".to_string(),
+        "--slice=app.slice".to_string(),
+        format!("--unit=app-cce\\x2dcloud-{}-{n}", scope_name_part(program)),
+        format!("--property=PartOf={SESSION_TARGET}"),
+        "--".to_string(),
+        program.to_string(),
+    ];
+    argv.extend(args.iter().map(|a| a.to_string()));
+    argv
+}
+
 fn spawn_detached(program: &str, args: &[&str]) {
-    // Launched apps must outlive this daemon: process_group(0) moves them out
-    // of our process group so a terminal ^C (manual daemon run) doesn't kill
-    // them, and cce-cloud.service sets KillMode=process so a service restart
-    // doesn't cgroup-kill them either (systemd kills by cgroup, which no
-    // amount of setsid/double-fork escapes).
+    // Launched apps must outlive this daemon but not the session. Each gets
+    // its own transient scope (`scope_argv`): a service restart signals only
+    // the daemon (cce-cloud.service's KillMode=process) and never reaches
+    // another unit's cgroup, while the scope's PartOf= stops the app with
+    // the session. Until 2026-09-26 apps stayed in this service's cgroup,
+    // where KillMode=process left them running after logout: a Proton
+    // launch queued behind a still-running game started in the NEXT
+    // session before its Xwayland existed, ran with no display, and held
+    // every later launch of it behind itself. process_group(0) still keeps
+    // a terminal ^C (manual daemon run) away from them.
     use std::os::unix::process::CommandExt;
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args).process_group(0);
+    let mut cmd = if command_in_path("systemd-run") {
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let mut c = std::process::Command::new("systemd-run");
+        c.args(scope_argv(program, args, n));
+        c
+    } else {
+        let mut c = std::process::Command::new(program);
+        c.args(args);
+        c
+    };
+    cmd.process_group(0);
     // Per-user runtime dir, not /tmp: this records every app the launcher
     // starts and captures their stdout/stderr, so a fixed /tmp path is both a
     // collision between users and a readable trace of one user's activity.
@@ -4923,5 +4974,38 @@ impl FuzzelWidget {
             }
         }
         labels
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn launches_run_in_a_session_bound_scope() {
+        let argv = scope_argv("/usr/bin/sh", &["-c", "exec cce-files"], 7);
+        assert_eq!(
+            argv,
+            [
+                "--user",
+                "--scope",
+                "--collect",
+                "--slice=app.slice",
+                "--unit=app-cce\\x2dcloud-sh-7",
+                "--property=PartOf=cce-session.target",
+                "--",
+                "/usr/bin/sh",
+                "-c",
+                "exec cce-files",
+            ]
+        );
+    }
+
+    #[test]
+    fn unit_names_keep_only_legal_characters() {
+        assert_eq!(scope_name_part("google-chrome-stable"), "google-chrome-stable");
+        assert_eq!(scope_name_part("/opt/1Password/1password"), "1password");
+        assert_eq!(scope_name_part("my app.bin"), "my_app_bin");
+        assert_eq!(scope_name_part(""), "app");
     }
 }

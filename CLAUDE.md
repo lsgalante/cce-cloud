@@ -92,7 +92,15 @@ needs-stdin decision, in `run_client()`).
   frecency persisted in `~/.cache/cce-cloud-apps.json`; selecting spawns the app's
   `Exec` (spawn output logged to `$XDG_RUNTIME_DIR/cce/spawn.log`, via
   `cce_ui::config::cce_runtime_dir()` — it was `/tmp/cce-spawn.log` before
-  2026-08-22). Each entry's `Icon=` is
+  2026-08-22). Every launch (`spawn_detached`) runs in **its own transient
+  scope**, `app-cce\x2dcloud-<name>-<n>.scope` in app.slice, `PartOf=`
+  `cce-session.target` (`scope_argv`, through `systemd-run --scope`): a daemon
+  restart never reaches it, and the session's end stops it. Until 2026-09-26
+  launches stayed in cce-cloud.service's own cgroup, where `KillMode=process`
+  (there so a restart would not kill them) also let them outlive logout — a
+  queued Proton launch then started in the next session before Xwayland
+  existed and ran invisible. Without `systemd-run` on PATH the app is started
+  directly, as before. Each entry's `Icon=` is
   resolved through `cce_ui::icon` and drawn in a gutter left of the label — the
   gutter is applied to every row, so one unresolvable icon doesn't rag the text
   edge. Apps and the Super-Tab switcher are the only lists with icons: other

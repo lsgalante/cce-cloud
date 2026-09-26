@@ -16,9 +16,10 @@ Type=simple
 ExecStart=%h/.local/bin/cce-cloud --daemon
 Restart=on-failure
 RestartSec=3
-# The daemon spawns the user's app-menu launches as children; with the
-# default control-group kill mode a service restart silently kills every
-# app ever launched from the menu. Only signal the daemon itself.
+# Launches run in their own transient scopes (PartOf=cce-session.target, see
+# spawn_detached), so they are outside this cgroup and a restart cannot reach
+# them. KillMode=process stays for anything still here from before that --
+# with the default control-group mode a restart would kill those.
 KillMode=process
 Environment=RUST_LOG=info
 # App launches inherit this PATH; without %h/.local/bin, desktop entries
