@@ -746,11 +746,22 @@ fn spawn_detached(program: &str, args: &[&str]) {
         let _ = writeln!(f, "[spawn] executing: {} {}", program, args.join(" "));
         cmd.stdout(f.try_clone().unwrap()).stderr(f);
     }
-    // Through the toolkit's reaping spawn, NOT a bare `cmd.spawn()`: the daemon
+    // Through the reaping spawn below, NOT a bare `cmd.spawn()`: the daemon
     // lives for the whole session, and a dropped Child handle means every app
     // it ever launched sits in the process table as a zombie once it exits —
     // unreadable in /proc and reported "alive" by kill(pid, 0) probes.
-    let _ = cce_ui::process::spawn_detached(cmd);
+    let _ = spawn_reaped(cmd);
+}
+
+/// Spawn `cmd` and reap it on a background thread. This was
+/// `cce_ui::process::spawn_detached` until the toolkit dropped that module
+/// (cce-ui 4e94236) as caller-less — `spawn_detached` above was a caller.
+fn spawn_reaped(mut cmd: std::process::Command) -> std::io::Result<()> {
+    let mut child = cmd.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
 }
 
 
