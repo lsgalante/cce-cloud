@@ -122,6 +122,12 @@ bound with plain `get_keyboard`, and a held Backspace deleted one character.
   `StartupWMClass`, or last reverse-DNS component, falling back to the app_id
   itself, which is the name cce's own apps install their icons under. The rows
   stream in over stdin, so `resolve_switcher_icons` runs on each ingest.
+  Both paths first ask `icon_override` for a cce-icons glyph named after the
+  entry's **desktop-file ID** (`$XDG_DATA_HOME/icons/hicolor/scalable/apps/<id>.svg`,
+  one stat), which is how cce draws its own icon for an entry whose `Icon=` is
+  an absolute path, missing, or a generic name several apps share — see
+  `cce-icons/hicolor/README.md`. Overrides named after the `Icon=` value need
+  nothing here: the user's data dir is the theme search's first base dir.
   Icons are uploaded per popup on purpose (`cce_ui::icon::upload_themed` caches
   the decode, not the image id) because `Drop` destroys this app's `VkRenderer`
   between popups and an id cached across them would name freed GPU resources.
@@ -169,7 +175,11 @@ in each of the paint, scroll and hit-test paths: the strip shifts the whole list
 down by its own height, and a path that missed the shift would put the rows, the
 clip and the click out of step. The icon gutter is per-tab
 (`recompute_icon_gutter`), so the System page's rows sit flush left while the
-Apps page keeps its column.
+Apps page keeps its column — and so is the row height: `item_h()` is
+`ICON_ITEM_H` (36, for a 26px icon) while a gutter exists and `ITEM_H` (25)
+otherwise. Every index→y path reads `item_h()`, and a gutter change re-runs
+`update_scroll`, because the icons usually land after `set_items` has already
+sized the scroll bounds for text rows.
 
 The strip is painted by hand in the toolkit's recessed `ButtonStrip` idiom — one
 well carved into the window plate, segments on its floor, the active one a

@@ -334,6 +334,7 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
 
     if is_application && !no_display {
         if let (Some(n), Some(e)) = (name, exec) {
+            let icon = path.file_stem().and_then(|s| s.to_str()).and_then(icon_override).or(icon);
             return Some(AppInfo { name: n, exec: e, terminal, icon });
         }
     }
@@ -346,16 +347,7 @@ fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
 /// exports visible.
 fn application_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
-    let data_home = std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        });
-    if let Some(data_home) = data_home {
+    if let Some(data_home) = data_home() {
         dirs.push(data_home.join("applications"));
     }
     let data_dirs = std::env::var("XDG_DATA_DIRS")
@@ -368,6 +360,41 @@ fn application_dirs() -> Vec<std::path::PathBuf> {
         }
     }
     dirs
+}
+
+/// `$XDG_DATA_HOME`, defaulting per the base-directory spec.
+fn data_home() -> Option<std::path::PathBuf> {
+    std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        })
+}
+
+/// cce's own icon for the desktop entry `id` (its file stem), when cce-icons
+/// ships one: `hicolor/scalable/apps/<id>.svg` under `$XDG_DATA_HOME/icons`,
+/// where `ccebuild install` puts that tree. Returned as an absolute path, so
+/// it bypasses the theme search entirely.
+///
+/// This is what lets cce draw its own artwork for apps it does not own. An
+/// override named after the entry's `Icon=` value already wins without help
+/// (the user's data dir is searched first), but that cannot reach an entry
+/// whose `Icon=` is an absolute path (Houdini's PNG), is missing (Raindrop),
+/// or is a generic name several apps share (`network-wired` for all three
+/// Avahi browsers) — those are overridden by desktop-file ID instead. One stat
+/// per entry: the theme walk `cce_ui::icon::lookup` does would cost ~200 per
+/// miss, for every app, on every launcher open.
+fn icon_override(id: &str) -> Option<String> {
+    icon_override_in(&data_home()?.join("icons/hicolor/scalable/apps"), id)
+}
+
+fn icon_override_in(dir: &std::path::Path, id: &str) -> Option<String> {
+    let path = dir.join(format!("{id}.svg"));
+    path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 
 fn scan_apps() -> Vec<AppInfo> {
@@ -430,6 +457,7 @@ fn split_switcher_row(item: &str) -> (&str, &str) {
 /// the last reverse-DNS component is indexed too, so `org.gnome.Nautilus`
 /// matches a window that reports plain `nautilus`. Unlike [`scan_apps`] this
 /// keeps NoDisplay entries: a helper window is still a window with an icon.
+/// A cce icon override for the entry ([`icon_override`]) replaces its `Icon=`.
 fn desktop_icon_index(dirs: &[std::path::PathBuf]) -> std::collections::HashMap<String, String> {
     let mut index = std::collections::HashMap::new();
     for dir in dirs {
@@ -456,7 +484,8 @@ fn desktop_icon_index(dirs: &[std::path::PathBuf]) -> std::collections::HashMap<
                     }
                 }
             }
-            let Some(icon) = icon.filter(|i| !i.is_empty()) else { continue };
+            // A cce override for the entry wins, as in [`parse_desktop_file`].
+            let Some(icon) = icon_override(stem).or(icon.filter(|i| !i.is_empty())) else { continue };
             let stem = stem.to_lowercase();
             let short = stem.rsplit('.').next().map(str::to_string);
             // First claim wins, in XDG precedence — the same shadowing
@@ -884,10 +913,10 @@ pub struct TabPage {
     query: String,
 }
 
-/// Icon edge length inside a 25px row. The gap between it and the label is
-/// the toolkit's control text inset, the same standoff the label keeps from
-/// the selection chip's edge.
-const ICON_PX: f32 = 17.0;
+/// Icon edge length inside an [`ICON_ITEM_H`] row. The gap between it and the
+/// label is the toolkit's control text inset, the same standoff the label
+/// keeps from the selection chip's edge.
+const ICON_PX: f32 = 26.0;
 
 /// The list chrome's metrics. The spacing around them — the inset from the
 /// popup edge, the gap under the tab strip and under the search well, the
@@ -900,6 +929,10 @@ const ICON_PX: f32 = 17.0;
 /// go out of step.
 const SEARCH_H: f32 = 35.0;
 const ITEM_H: f32 = 25.0;
+/// Row height once the list carries icons (Apps mode, the window switcher):
+/// the icon plus a 5px standoff above and below. Text-only lists — dmenu,
+/// Path, the System tab — keep the tighter [`ITEM_H`].
+const ICON_ITEM_H: f32 = 36.0;
 /// Height of the tab strip's segmented run; the strip claims this plus one
 /// root-plate gap off the top (see [`FuzzelWidget::tab_strip_h`]).
 const TAB_RUN_H: f32 = 22.0;
@@ -1099,7 +1132,20 @@ impl FuzzelWidget {
     /// (see [`Self::set_item_icons`]).
     fn recompute_icon_gutter(&mut self) {
         let any = self.all_items.iter().any(|t| self.icons.contains_key(t));
-        self.icon_gutter = if any { ICON_PX + cce_ui::layout::CONTROL_TEXT_INSET } else { 0.0 };
+        let gutter = if any { ICON_PX + cce_ui::layout::CONTROL_TEXT_INSET } else { 0.0 };
+        if gutter != self.icon_gutter {
+            self.icon_gutter = gutter;
+            // The row height follows the gutter (see `item_h`), so the
+            // content height the scroll bounds hold just changed.
+            self.update_scroll();
+        }
+    }
+
+    /// Height of one row: taller when the list has an icon column. Every
+    /// path that turns an index into a y — paint, hit-test, scroll bounds,
+    /// keyboard snap, the popup's own height — reads it here.
+    pub fn item_h(&self) -> f32 {
+        if self.icon_gutter > 0.0 { ICON_ITEM_H } else { ITEM_H }
     }
 
     /// Give rows an icon column. Apps mode sets its whole map here; the
@@ -1158,7 +1204,7 @@ impl FuzzelWidget {
     }
 
     pub fn update_scroll(&mut self) {
-        let content_h = self.filtered_items.len() as f32 * ITEM_H;
+        let content_h = self.filtered_items.len() as f32 * self.item_h();
         self.scroll_box.update_bounds_raw(content_h, self.list_y(), self.list_h());
         self.refresh_hover();
     }
@@ -1170,7 +1216,7 @@ impl FuzzelWidget {
     /// and a row `get_draw_y` places in the viewport — partially visible
     /// rows included, drawn cut by the clip, so an edge sliver counts.
     fn row_at(&self, px: f32, py: f32) -> Option<usize> {
-        let item_h = ITEM_H;
+        let item_h = self.item_h();
         if !self.scroll_box.hit(px, py) || self.scroll_box.hit_scrollbar(px, py) {
             return None;
         }
@@ -1209,7 +1255,7 @@ impl FuzzelWidget {
     }
 
     pub fn snap_to_selected(&mut self) {
-        let item_h = ITEM_H;
+        let item_h = self.item_h();
         let viewport_h = self.list_h();
         let content_h = self.filtered_items.len() as f32 * item_h;
 
@@ -1331,7 +1377,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         };
         ctx.clip(viewport, |ctx| {
             // Selected Item Highlight
-            let item_h = ITEM_H;
+            let item_h = self.item_h();
             if !self.filtered_items.is_empty() {
                 let virtual_selected_y = self.selected as f32 * item_h;
                 if let Some(draw_y) = self.scroll_box.get_draw_y(virtual_selected_y, item_h) {
@@ -1372,7 +1418,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             // only rows `get_draw_y` places in the viewport are emitted, so a
             // 300-app list still costs one image quad per visible row.
             if self.icon_gutter > 0.0 {
-                let item_h = ITEM_H;
+                let item_h = self.item_h();
                 for (idx, item_text) in self.filtered_items.iter().enumerate() {
                     let Some((image, iw, ih)) = self.icons.get(item_text).copied() else { continue };
                     if let Some(draw_y) = self.scroll_box.get_draw_y(idx as f32 * item_h, item_h) {
@@ -2111,7 +2157,7 @@ impl State {
         }
         let num_items = self.fuzzel.filtered_items.len();
         let item_count = if num_items == 0 { 1 } else { num_items };
-        let needed_height = self.fuzzel.chrome_h() + (item_count as f32) * ITEM_H;
+        let needed_height = self.fuzzel.chrome_h() + (item_count as f32) * self.fuzzel.item_h();
         let target_height = needed_height.min(self.max_height as f32);
 
         // Calculate max text width
@@ -2357,6 +2403,8 @@ impl State {
             images: &self.frame_images,
             plate_features: &self.plate_features,
             clear_color: [0.0; 4],
+            // Always a full frame: the popup is small and repaints whole.
+            damage: None,
         });
         false
     }
@@ -4749,6 +4797,24 @@ mod tests {
     }
 
     #[test]
+    fn icon_override_is_keyed_by_desktop_id() {
+        let dir = std::path::PathBuf::from("/tmp/cce-cloud-test-icon-override");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("houdini.svg"), "<svg/>").unwrap();
+
+        // The ID's own file, as an absolute path - an entry whose Icon= is
+        // an absolute path or missing still gets cce's artwork.
+        assert_eq!(
+            icon_override_in(&dir, "houdini").as_deref(),
+            Some(dir.join("houdini.svg").to_str().unwrap())
+        );
+        // No override: the caller falls back to the entry's own Icon=.
+        assert_eq!(icon_override_in(&dir, "raindropio"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn scan_apps_xdg_precedence() {
         let base = std::path::PathBuf::from("/tmp/cce-cloud-test-xdg");
         let _ = std::fs::remove_dir_all(&base);
@@ -5024,7 +5090,7 @@ impl FuzzelWidget {
     /// in) the viewport. Emitted under the paint walk's list clip, separately
     /// from [`Self::own_labels`], which draws chrome outside it.
     fn row_labels(&self) -> Vec<TextLabel> {
-        let item_h = ITEM_H;
+        let item_h = self.item_h();
         let mut labels = Vec::new();
         for (idx, item_text) in self.filtered_items.iter().enumerate() {
             let virtual_y = idx as f32 * item_h;
@@ -5043,7 +5109,9 @@ impl FuzzelWidget {
                     // Indented past the icon column whether or not THIS row
                     // resolved an icon — see `icon_gutter`.
                     x: self.text_x() + self.icon_gutter,
-                    y: draw_y + 4.0,
+                    // 4px down in a text-only row; a taller icon row
+                    // centres the same line box.
+                    y: draw_y + (item_h - ITEM_H) / 2.0 + 4.0,
                     font_size: 13.0,
                     color,
                 });
