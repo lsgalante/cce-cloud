@@ -2440,7 +2440,10 @@ struct AppState {
     exit: bool,
     redraw: bool,
     ctrl_pressed: bool,
-    super_pressed: bool,
+    /// The switcher's hold modifier — Super or Alt, whichever chord opened
+    /// it — is still down. Starts true in switcher mode (the chord that
+    /// opened it is held); its release commits the highlighted row.
+    switch_held: bool,
     switcher_mode: bool,
     /// When the compositor's close dissolve ends and this popup may go, set
     /// by `trigger_close`. `None` while the popup is live. The surface has to
@@ -3047,13 +3050,15 @@ impl KeyboardHandler for AppState {
         modifiers: smithay_client_toolkit::seat::keyboard::Modifiers,
         _layout: u32,
     ) {
-        let prev_super = self.super_pressed;
+        let prev_held = self.switch_held;
         self.ctrl_pressed = modifiers.ctrl;
-        self.super_pressed = modifiers.logo;
-        log::debug!("update_modifiers: logo={}, prev_logo={}", modifiers.logo, prev_super);
+        // Super+Tab or Alt+Tab: either can be bound to the switcher, and it
+        // cannot tell which opened it, so it commits once neither is held.
+        self.switch_held = modifiers.logo || modifiers.alt;
+        log::debug!("update_modifiers: logo={}, alt={}, prev_held={}", modifiers.logo, modifiers.alt, prev_held);
 
-        if self.switcher_mode && prev_super && !self.super_pressed {
-            log::info!("Super modifier released in switcher mode, selecting currently highlighted item");
+        if self.switcher_mode && prev_held && !self.switch_held {
+            log::info!("Switcher modifier (Super/Alt) released, selecting currently highlighted item");
             self.trigger_select_and_close();
         }
     }
@@ -3542,7 +3547,7 @@ fn run_standalone() {
         exit: false,
         redraw: false,
         ctrl_pressed: false,
-        super_pressed: switcher_mode,
+        switch_held: switcher_mode,
         switcher_mode,
         fade_until: None,
         cce_toplevel: None,
@@ -3856,7 +3861,7 @@ fn run_daemon(socket_path: &str) {
         exit: false,
         redraw: false,
         ctrl_pressed: false,
-        super_pressed: false,
+        switch_held: false,
         switcher_mode: false,
         fade_until: None,
         cce_toplevel: None,
@@ -4130,7 +4135,7 @@ fn run_daemon(socket_path: &str) {
             }
         }).unwrap();
 
-        app.super_pressed = switcher_mode;
+        app.switch_held = switcher_mode;
         app.switcher_mode = switcher_mode;
         app.selected_item = None;
 
