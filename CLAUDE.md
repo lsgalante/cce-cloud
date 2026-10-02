@@ -86,7 +86,7 @@ needs-stdin decision, in `run_client()`).
 
 - `Dmenu` — items from stdin, selection echoed out. Magic stdin lines
   `__cce_switcher_next__` / `__cce_switcher_select_and_close__` drive the compositor's
-  window switcher (`--switcher` starts in Dmenu with its hold modifier down, and commits when neither Super nor Alt is held, so it works bound to Super+Tab or Alt+Tab).
+  window switcher (`--switcher` starts in Dmenu with its hold modifier down, and commits when neither Super nor Alt is held, so it works bound to Super+Tab or Alt+Tab; moving the pointer onto a row selects it — `FuzzelWidget::pointer_moved`, motion only, so a popup mapping under a resting pointer does not steal the row Super+Tab advanced to).
 - `Path` — executables scanned from `$PATH`.
 **Key repeat** is the client's job on Wayland: the keyboard is bound with
 `get_keyboard_with_repeat` on the calloop loop, which re-fires a held key at

@@ -880,12 +880,19 @@ pub struct FuzzelWidget {
     icon_gutter: f32,
     /// Rows are the window switcher's `Title (app_id)` lines: draw only the
     /// title (see [`split_switcher_row`]). The item text — what filtering
-    /// matches and what a selection echoes back — keeps the suffix.
+    /// matches and what a selection echoes back — keeps the suffix. Also
+    /// makes pointer motion select (see [`Self::pointer_moved`]).
     pub switcher_rows: bool,
     /// Row under the pointer, by filtered index — the hover wash and the
     /// brighter label. Distinct from `selected`: hovering never moves the
-    /// keyboard selection, only a click does.
+    /// keyboard selection, only a click does — except in the switcher, where
+    /// MOVING onto a row selects it ([`Self::pointer_moved`]).
     hovered: Option<usize>,
+    /// The row the switcher's last pointer motion selected, so the pointer
+    /// only takes the selection when it moves onto a NEW row: Tab can still
+    /// move the chip away from a resting (or jiggling) pointer. Cleared when
+    /// the pointer leaves, so the first motion after it enters selects.
+    motion_row: Option<usize>,
     /// Last pointer position seen over the surface, so the hovered row can be
     /// re-derived when the rows move under a STATIONARY pointer — a wheel
     /// glide, a keystroke refiltering the list, a keyboard snap.
@@ -959,6 +966,7 @@ impl FuzzelWidget {
             icon_gutter: 0.0,
             switcher_rows: false,
             hovered: None,
+            motion_row: None,
             cursor: None,
             // Designer raise/sink treatment: the bar idles sunk under the
             // list's translucent bg (dimly visible through it) and raises over
@@ -1236,9 +1244,33 @@ impl FuzzelWidget {
         self.refresh_hover()
     }
 
+    /// The pointer MOVED to `(px, py)` — a Motion, unlike the Enter that a
+    /// popup mapping under a resting pointer also sends. In the switcher,
+    /// moving onto a row selects it, so releasing the hold modifier switches
+    /// to the window under the pointer. Only motion does this: rows shifting
+    /// under a still pointer (a refilter, a scroll, the popup mapping where
+    /// it rests) must not steal the selection Super+Tab just advanced. True
+    /// when anything drawn changed.
+    pub fn pointer_moved(&mut self, px: f32, py: f32) -> bool {
+        let moved = self.cursor != Some((px, py));
+        let mut changed = self.hover_at(px, py);
+        if self.switcher_rows && moved && self.hovered != self.motion_row {
+            self.motion_row = self.hovered;
+            // No `snap_to_selected`: the row is already drawn (`row_at`), and
+            // scrolling a cut edge row fully in would slide the next row under
+            // the pointer and select that one too.
+            if let Some(idx) = self.hovered.filter(|&i| i != self.selected) {
+                self.selected = idx;
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// The pointer left the surface; true when a row was lit.
     pub fn clear_hover(&mut self) -> bool {
         self.cursor = None;
+        self.motion_row = None;
         self.refresh_hover()
     }
 
@@ -2710,7 +2742,7 @@ impl PointerHandler for AppState {
                             if dragged {
                                 st.fuzzel.update_scroll();
                             }
-                            if st.fuzzel.hover_at(cx, cy) || dragged {
+                            if st.fuzzel.pointer_moved(cx, cy) || dragged {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
@@ -2800,10 +2832,11 @@ impl PointerHandler for AppState {
                                     // here), so the click IS the choice, exactly as Enter.
                                     // (The old gate gated Apps/Path on `selected ==
                                     // prev_selected`, which read as the click doing
-                                    // nothing.) The SWITCHER keeps two-click: its rows are
-                                    // live windows, and focusing one on a stray first
-                                    // click would be destructive — click to inspect the
-                                    // selection, click it again to commit.
+                                    // nothing.) The SWITCHER commits only a click on the
+                                    // row already selected — which, since moving onto a
+                                    // row selects it (`pointer_moved`), is any row the
+                                    // pointer reached by motion. A click on a row it only
+                                    // rests on (the popup mapped under it) selects first.
                                     let commit = !st.switcher_mode || st.fuzzel.selected == prev_selected;
                                     if commit {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
@@ -4925,6 +4958,42 @@ mod tests {
         assert_eq!(f.tab_strip_h(), 0.0);
         assert!(!f.cycle_tab(true));
         assert!(f.tab_at(20.0, 20.0).is_none());
+    }
+
+    #[test]
+    fn switcher_motion_onto_a_row_selects_it() {
+        let mut f = FuzzelWidget::new("Search: ".to_string());
+        f.set_rect(0.0, 0.0, 600.0, 400.0);
+        f.switcher_rows = true;
+        f.set_items((0..4).map(|i| format!("Window {i} (app{i})")).collect());
+        f.selected = 1; // Super+Tab advanced past the focused window
+        let x = 100.0;
+        let (list_y, item_h) = (f.list_y(), f.item_h());
+        let row_y = |i: usize| list_y + item_h * (i as f32 + 0.5);
+
+        // The popup mapping under a resting pointer is an Enter, not motion:
+        // it lights the row but leaves the selection where Super+Tab put it.
+        f.hover_at(x, row_y(3));
+        assert_eq!(f.selected, 1);
+
+        // Any motion over a row selects it...
+        assert!(f.pointer_moved(x, row_y(3) + 1.0));
+        assert_eq!(f.selected, 3);
+        assert!(f.pointer_moved(x, row_y(2)));
+        assert_eq!(f.selected, 2);
+
+        // ...but Tab can still move the chip off a pointer jiggling in place.
+        f.selected = 0;
+        f.pointer_moved(x, row_y(2) + 1.0);
+        assert_eq!(f.selected, 0);
+
+        // Outside the switcher, hovering never moves the selection.
+        let mut g = FuzzelWidget::new("Search: ".to_string());
+        g.set_rect(0.0, 0.0, 600.0, 400.0);
+        g.set_items(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        let (list_y, item_h) = (g.list_y(), g.item_h());
+        g.pointer_moved(x, list_y + item_h * 2.5);
+        assert_eq!(g.selected, 0);
     }
 
     #[test]
