@@ -3910,11 +3910,12 @@ fn run_daemon(socket_path: &str) {
 
         let (stdin_sender, stdin_channel) = calloop::channel::channel::<()>();
 
-        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
-        let mut initial_line = String::new();
-        if reader.read_line(&mut initial_line).is_err() {
+        // Bounded: this runs on the launcher's main loop, so a client that
+        // connected and said nothing used to freeze the launcher outright.
+        // The line carries a dmenu list inline, hence the generous size.
+        let Some(initial_line) = read_request_line(&stream, 16 * 1024 * 1024, std::time::Duration::from_secs(3)) else {
             continue;
-        }
+        };
         let t_request = std::time::Instant::now();
 
         let payload: serde_json::Value = match serde_json::from_str(&initial_line) {
@@ -5187,5 +5188,82 @@ mod repeat_tests {
         assert!(!key_repeats(K::Tab, Some("\t")));
         // A modifier or dead key carries no text: nothing to repeat.
         assert!(!key_repeats(K::Shift_L, None));
+    }
+}
+
+/// One request line from a control-socket client, bounded in size and in
+/// TOTAL time. Until 2026-10-02 this was `BufReader::read_line` on a socket
+/// with no timeout at all, on the daemon's main loop, so a client that connected and said nothing (or trickled a
+/// byte at a time) held the launcher frozen —
+/// no popup, no app menu, no switcher — until the client went away. None on EOF before any byte, timeout,
+/// overflow or a read error.
+fn read_request_line(conn: &std::os::unix::net::UnixStream, limit: usize, deadline: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    let until = std::time::Instant::now() + deadline;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut reader = conn;
+    loop {
+        let left = until.checked_duration_since(std::time::Instant::now()).filter(|d| !d.is_zero())?;
+        conn.set_read_timeout(Some(left)).ok()?;
+        let n = reader.read(&mut chunk).ok()?;
+        if n == 0 {
+            if buf.is_empty() {
+                return None;
+            }
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(end) = buf.iter().position(|&b| b == b'\n') {
+            buf.truncate(end + 1);
+            break;
+        }
+        if buf.len() > limit {
+            return None;
+        }
+    }
+    let _ = conn.set_read_timeout(None);
+    String::from_utf8(buf).ok()
+}
+
+#[cfg(test)]
+mod request_line_tests {
+    use super::read_request_line;
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_request_line_is_bounded_in_time_and_size() {
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(b"open note\nmore").unwrap();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_secs(1)).as_deref(), Some("open note\n"));
+
+        // Silent: given up at the deadline, not held forever.
+        let (_quiet, server) = UnixStream::pair().unwrap();
+        let t = Instant::now();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_millis(100)), None);
+        assert!(t.elapsed() < Duration::from_millis(500));
+
+        // Trickling a byte at a time: the TOTAL deadline still ends it.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let trickle = std::thread::spawn(move || {
+            for _ in 0..40 {
+                if client.write_all(b"x").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        });
+        let t = Instant::now();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_millis(150)), None);
+        assert!(t.elapsed() < Duration::from_millis(500), "took {:?}", t.elapsed());
+        drop(server);
+        trickle.join().unwrap();
+
+        // Over the size cap.
+        let (mut client, server) = UnixStream::pair().unwrap();
+        client.write_all(&[b'z'; 2000]).unwrap();
+        assert_eq!(read_request_line(&server, 1024, Duration::from_millis(200)), None);
     }
 }
