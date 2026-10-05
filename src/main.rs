@@ -1747,6 +1747,7 @@ impl State {
         json_layout_config: Option<JsonLayoutConfig>,
         parent_app_id: Option<String>,
         fonts: Option<(FontSystem, SwashCache)>,
+        renderer: Option<VkRenderer>,
     ) -> Result<
         (Self, Option<cce_ui::protocol::cce_window_management_v1::zcce_toplevel_v1::ZcceToplevelV1>),
         cce_ui::vk::SurfaceLost,
@@ -1890,18 +1891,27 @@ impl State {
         // Raw-Vulkan renderer on the same display/surface pointers the wgpu
         // stack used. Corner radius 0: the window background tessellates its own
         // rounded corners (rounded_rect_vertices_corners).
+        //
+        // The daemon hands in the renderer it kept from the last popup, and
+        // moving it onto this surface costs one swapchain. Building a new one
+        // costs a device and every pipeline: 70-100 ms of a ~100 ms popup on
+        // an idle machine, several hundred under load. Both fail only when
+        // the connection is already dead under the surface.
         let t = std::time::Instant::now();
-        // Fails only when the connection is already dead under the surface.
-        let renderer = unsafe {
-            VkRenderer::try_new(
-                conn.backend().display_id().as_ptr() as *mut std::ffi::c_void,
-                wl_surface.id().as_ptr() as *mut std::ffi::c_void,
-                pw,
-                ph,
-                0.0,
-            )
-        }?;
-        log::debug!("[timing] VkRenderer::try_new: {:?}", t.elapsed());
+        let display_ptr = conn.backend().display_id().as_ptr() as *mut std::ffi::c_void;
+        let surface_ptr = wl_surface.id().as_ptr() as *mut std::ffi::c_void;
+        let renderer = match renderer {
+            Some(mut kept) => {
+                unsafe { kept.attach_surface(display_ptr, surface_ptr, pw, ph) }?;
+                log::debug!("[timing] VkRenderer::attach_surface: {:?}", t.elapsed());
+                kept
+            }
+            None => {
+                let made = unsafe { VkRenderer::try_new(display_ptr, surface_ptr, pw, ph, 0.0) }?;
+                log::debug!("[timing] VkRenderer::try_new: {:?}", t.elapsed());
+                made
+            }
+        };
 
         // Reuse the daemon's font system across popups (a rebuild re-scans the
         // fonts dir and loses the shaping caches).
@@ -1955,10 +1965,10 @@ impl State {
             let app_names: Vec<String> = apps.iter().map(|app| app.name.clone()).collect();
 
             // Resolve every entry's Icon= against the icon theme. Uploads are
-            // per-popup by design (see cce_ui::icon::upload_themed): the daemon
-            // tears its VkRenderer down between popups, so an id cached across
-            // them would name freed GPU resources. Only the decode is cached, so
-            // the second open of the launcher skips the disk and the rasterizer.
+            // per-popup, and the daemon frees them when the popup closes (the
+            // renderer itself is kept). Only the decode is cached (see
+            // cce_ui::icon::upload_themed), so the second open of the launcher
+            // skips the disk and the rasterizer.
             let t_icons = std::time::Instant::now();
             let icons: std::collections::HashMap<String, (u32, u32, u32)> = apps
                 .iter()
@@ -2141,8 +2151,8 @@ impl State {
 
     /// Give the switcher's window rows their app's icon. Rows stream in over
     /// stdin, so this runs per ingest and only resolves the rows that don't
-    /// have an icon yet. Uploads are per-popup for the same reason as Apps
-    /// mode's (see `State::new`). `index` is `State::switcher_icon_index`.
+    /// have an icon yet. Uploads are per-popup, like Apps mode's (see
+    /// `State::new`). `index` is `State::switcher_icon_index`.
     fn resolve_switcher_icons(
         fuzzel: &mut FuzzelWidget,
         index: &mut Option<std::collections::HashMap<String, String>>,
@@ -3618,6 +3628,7 @@ fn run_standalone() {
         json_layout_config,
         parent_app_id,
         None,
+        None,
     )
     .unwrap_or_else(|lost| {
         log::error!("cannot open the window: {lost}");
@@ -3903,6 +3914,39 @@ fn run_daemon(socket_path: &str) {
     };
 
     event_queue.roundtrip(&mut app).unwrap();
+
+    // The renderer every popup draws with, built now on a surface that is
+    // never mapped and then detached from it, so the first popup only
+    // attaches it as every later one does. Each popup hands it back when it
+    // closes (see the end of the loop). If this fails the first popup builds
+    // its own, as all of them used to.
+    let t_renderer = std::time::Instant::now();
+    let mut renderer_slot: Option<VkRenderer> = {
+        let scratch = app.compositor_state.create_surface(&qh);
+        let made = unsafe {
+            VkRenderer::try_new(
+                conn_clone.backend().display_id().as_ptr() as *mut std::ffi::c_void,
+                scratch.id().as_ptr() as *mut std::ffi::c_void,
+                1,
+                1,
+                0.0,
+            )
+        };
+        let kept = match made {
+            Ok(mut r) => {
+                r.detach_surface();
+                Some(r)
+            }
+            Err(e) => {
+                log::warn!("could not prewarm the popup renderer: {e}");
+                None
+            }
+        };
+        scratch.destroy();
+        let _ = conn_clone.flush();
+        kept
+    };
+    log::info!("[timing] daemon renderer prewarm: {:?}", t_renderer.elapsed());
 
     let scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
     let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
@@ -4194,6 +4238,7 @@ fn run_daemon(socket_path: &str) {
             json_layout_config,
             parent_app_id,
             fonts_slot.take(),
+            renderer_slot.take(),
         ) {
             Ok(made) => made,
             Err(lost) => {
@@ -4314,6 +4359,18 @@ fn run_daemon(socket_path: &str) {
             );
             let sc = std::mem::replace(&mut st.swash_cache, SwashCache::new());
             fonts_slot = Some((fs, sc));
+            // Keep the renderer for the next popup, detached now: the State's
+            // drop below destroys this wl_surface, and the swapchain must not
+            // outlive it. Its images outlive the popup too, so free the row
+            // icons this popup uploaded (Apps, the switcher) or every open of
+            // the launcher would leave another set on the GPU.
+            for (_, (id, _, _)) in st.fuzzel.icons.drain() {
+                cce_ui::vk::free_image(id);
+            }
+            if let Some(mut r) = st.renderer.take() {
+                r.detach_surface();
+                renderer_slot = Some(r);
+            }
         }
         app.window = None;
         app.surface = None;

@@ -128,9 +128,11 @@ bound with plain `get_keyboard`, and a held Backspace deleted one character.
   an absolute path, missing, or a generic name several apps share — see
   `cce-icons/hicolor/README.md`. Overrides named after the `Icon=` value need
   nothing here: the user's data dir is the theme search's first base dir.
-  Icons are uploaded per popup on purpose (`cce_ui::icon::upload_themed` caches
-  the decode, not the image id) because `Drop` destroys this app's `VkRenderer`
-  between popups and an id cached across them would name freed GPU resources.
+  Icons are uploaded per popup (`cce_ui::icon::upload_themed` caches the
+  decode, not the image id), and the daemon frees them with
+  `cce_ui::vk::free_image` when the popup closes: the renderer outlives the
+  popup (see "One renderer for every popup" below), so an upload nobody freed
+  would stay on the GPU for the daemon's life.
   Apps is also the one **tabbed** mode: the list carries an *Apps* page and a
   *System* page of DE verbs (`SYSTEM_COMMANDS` — window-manager actions through
   `ccectl`, plus session/power commands), and **Tab / Shift+Tab step between
@@ -210,12 +212,26 @@ list across to `Frame2D::images`: images ride a separate pipeline from the verte
 batches, and that return value was dropped (with `images: &[]` hardcoded) until
 2026-08-16, which made `PaintCtx::image` a silent no-op *in this app only* while
 it worked in every engine-runner client. `State::renderer` is an `Option`
-solely so `Drop` can tear the swapchain down before destroying the `wl_surface` (daemon
-mode churns one `State` per popup). It still reuses cce-ui pieces à la carte: the
+so the daemon can take it back when a popup closes, and so `Drop` can tear the
+swapchain down before destroying the `wl_surface` in standalone mode. It still reuses cce-ui pieces à la carte: the
 narrow widget traits (`Layout`/`Paint`/`Input` via `Adapted<T>`), the scene paint walk
 (`append_widget_text`) for text extraction, `color`/`layout`/`scale` getters, and the
 `zcce_window_manager_v1` protocol. Follow existing cce-ui conventions when touching
 widget code, but don't try to "port" this app onto the engine runner.
+
+### One renderer for every popup
+
+The daemon keeps one `VkRenderer` for its whole life, like the font system:
+`State::new` takes it and moves it onto the popup's new `wl_surface` with
+`VkRenderer::attach_surface`, and when the popup closes the daemon takes it back
+and calls `detach_surface` BEFORE the `State` drops (the drop destroys the
+`wl_surface`, and a swapchain must not outlive it). `run_daemon` builds it at
+startup on a scratch surface that is never mapped, so the first popup attaches
+too. Until 2026-10-05 every popup built a new renderer, and its pipelines were
+70-100 ms of a ~100 ms popup on an idle machine and several hundred under
+load; a reopen is now one swapchain, and a menu popup is ready in ~2 ms and on
+screen in 15-40 ms. Anything a popup uploads to it (icons) must be freed at
+close for the same reason. Standalone mode still builds its own.
 
 Surface choice: an XDG toplevel flagged as popup via the cce window-management
 protocol when the compositor global is present and no `-x/-y` was given; otherwise a
