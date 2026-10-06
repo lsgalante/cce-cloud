@@ -1775,6 +1775,20 @@ fn json_widget_desired_width(widget_type: &str, text: &str) -> f32 {
     }
 }
 
+/// [`json_widget_desired_width`] for a widget as configured on page
+/// `page_idx` of `page` (its widgets): a button's width also holds its
+/// glyphs (`json_layout::button_glyphs`), and its text is measured without
+/// the mark the glyph replaces.
+fn json_conf_desired_width(w_conf: &crate::json_layout::JsonWidgetConfig, page: &[crate::json_layout::JsonWidgetConfig], page_idx: usize) -> f32 {
+    use crate::json_layout::{button_font_size, button_glyphs, glyph_room, page_has_lead};
+    if w_conf.widget_type != "button" {
+        return json_widget_desired_width(&w_conf.widget_type, &w_conf.text);
+    }
+    let (_, text, trail) = button_glyphs(&w_conf.text, page_idx, w_conf.target_page);
+    json_widget_desired_width("button", text)
+        + glyph_room(page_has_lead(page, page_idx), trail.is_some(), button_font_size())
+}
+
 impl State {
     fn new(
         conn: &Connection,
@@ -1810,15 +1824,15 @@ impl State {
                     let mut max_widget_w = 120.0f32; // fallback minimum
                     if let Some(ref widgets) = config.widgets {
                         for w_conf in widgets {
-                            let w_w = json_widget_desired_width(&w_conf.widget_type, &w_conf.text);
+                            let w_w = json_conf_desired_width(w_conf, widgets, 0);
                             if w_w > max_widget_w {
                                 max_widget_w = w_w;
                             }
                         }
                     } else if let Some(ref pages) = config.pages {
-                        for page in pages {
+                        for (page_idx, page) in pages.iter().enumerate() {
                             for w_conf in &page.widgets {
-                                let w_w = json_widget_desired_width(&w_conf.widget_type, &w_conf.text);
+                                let w_w = json_conf_desired_width(w_conf, &page.widgets, page_idx);
                                 if w_w > max_widget_w {
                                     max_widget_w = w_w;
                                 }
@@ -2236,7 +2250,16 @@ impl State {
                     if w.page_idx != active_page {
                         continue;
                     }
-                    let w_w = json_widget_desired_width(&w.widget_type, &w.text);
+                    // `w.text` is a button's label without its mark; the
+                    // glyphs take their own room beside it.
+                    let mut w_w = json_widget_desired_width(&w.widget_type, &w.text);
+                    if w.widget_type == "button" {
+                        w_w += crate::json_layout::glyph_room(
+                            w.lead_column,
+                            w.trail.is_some(),
+                            crate::json_layout::button_font_size(),
+                        );
+                    }
                     if w_w > max_widget_w {
                         max_widget_w = w_w;
                     }
@@ -4654,6 +4677,61 @@ mod tests {
                 "button '{label}': usable_w {usable_w} < label {label_w} + {} inset",
                 2.0 * text_inset,
             );
+        }
+    }
+
+    /// A JSON menu's marks and page turns are cce-icons glyphs, by the
+    /// toolkit's context-menu conventions: the label's leading mark is
+    /// drawn as its glyph and not as text, a button turning to a later page
+    /// ends in chevron-right, one turning back starts with chevron-left, and
+    /// the labels of a page with a left glyph share one edge.
+    #[test]
+    fn json_menu_marks_and_page_turns_are_glyphs() {
+        use crate::json_layout::button_glyphs;
+        assert_eq!(button_glyphs("✓ Wrap", 0, None), (Some("check"), "Wrap", None));
+        assert_eq!(button_glyphs("● Tiled", 1, None), (Some("circle"), "Tiled", None));
+        assert_eq!(button_glyphs("○ Floating", 1, None), (Some("circle-outline"), "Floating", None));
+        assert_eq!(button_glyphs("Window Mode", 0, Some(1)), (None, "Window Mode", Some("chevron-right")));
+        assert_eq!(button_glyphs("Back", 1, Some(0)), (Some("chevron-left"), "Back", None));
+        assert_eq!(button_glyphs("Terminal", 0, None), (None, "Terminal", None));
+
+        let json = r#"{"pages": [
+            {"title": "menu", "justify": "left", "widgets": [
+                {"type": "button", "text": "Window Mode", "id": "mode_page", "target_page": 1},
+                {"type": "button", "text": "Close Window", "id": "close"}
+            ]},
+            {"title": "Window Mode", "justify": "left", "widgets": [
+                {"type": "button", "text": "○ Floating", "id": "floating"},
+                {"type": "button", "text": "● Tiled", "id": "tiled"},
+                {"type": "button", "text": "Back", "id": "back", "target_page": 0}
+            ]}
+        ]}"#;
+        let config: JsonLayoutConfig = serde_json::from_str(json).unwrap();
+        let mut layout = JsonLayoutWidget::new(&config);
+        layout.set_rect(0.0, 0.0, 240.0, 300.0);
+        let ctx = cce_ui::context::UiContext::new();
+
+        let (labels, glyphs) = layout.labels_and_glyphs(&ctx);
+        let texts: Vec<&str> = labels.iter().map(|(l, _)| l.text.as_str()).collect();
+        assert_eq!(texts, ["Window Mode", "Close Window"]);
+        let names: Vec<&str> = glyphs.iter().map(|g| g.0).collect();
+        assert_eq!(names, ["chevron-right"]);
+        // The chevron stands at the row's right end.
+        let row = &layout.widgets[0];
+        assert!(glyphs[0].1.x > row.x + row.w / 2.0);
+
+        layout.active_page = 1;
+        layout.layout_children();
+        let (labels, glyphs) = layout.labels_and_glyphs(&ctx);
+        let texts: Vec<&str> = labels.iter().map(|(l, _)| l.text.as_str()).collect();
+        assert_eq!(texts, ["Floating", "Tiled", "Back"]);
+        let names: Vec<&str> = glyphs.iter().map(|g| g.0).collect();
+        assert_eq!(names, ["circle-outline", "circle", "chevron-left"]);
+        // Every label starts after its glyph, on one edge.
+        let edge = labels[0].0.x;
+        for ((l, _), g) in labels.iter().zip(&glyphs) {
+            assert!((l.x - edge).abs() < 0.01, "{} is not on the page's text edge", l.text);
+            assert!(g.1.x + g.1.width <= l.x, "the {} glyph overlaps its label", g.0);
         }
     }
 

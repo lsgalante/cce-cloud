@@ -142,6 +142,23 @@ bound with plain `get_keyboard`, and a held Backspace deleted one character.
 - `Json` — a `JsonLayoutConfig` read from stdin builds a widget panel; clicking a
   button prints one JSON object with the button id and every control's state
   (`{"button", "checkboxes", "spinboxes", "colors", "sliders"}`) and closes.
+  A button with `target_page` turns the panel to that page instead.
+  **A button's marks and page turns are cce-icons glyphs**, by cce-ui's
+  context-menu conventions (`json_layout::button_glyphs`; since 2026-10-05):
+  a `text` that BEGINS with `"✓ "`, `"● "` or `"○ "` (`context_menu::MARK_CHECK`
+  / `MARK_ON` / `MARK_OFF`) is drawn with the check / circle / circle-outline
+  glyph and the text without the mark; a `target_page` LOWER than the
+  button's own page is a back row, chevron-left at its left; any other
+  `target_page` leads to a page, chevron-right at its right end. A page where
+  any button has a left glyph reserves the column on all of them, so the
+  labels share an edge, and the popup's width budgets the glyphs. Nothing new
+  in the schema — the marks are the toolkit's, the direction is the
+  `target_page` the protocol already had — so a layout must NOT spell its own
+  (`"Window Mode >"`, `"< Back"`, `"[x] "`), or it shows them twice; a back
+  row's text is a word ("Back"), which is also all that shows if the icon set
+  is missing. `cce-compositor/scripts/cce-desktop-menu` and `cce-app-menu`
+  are the consumers that page. Glyphs draw through `PaintCtx::icon`, whose
+  upload rides the shared queue this app's renderer drains each frame.
 
 Key flags: `-p/--prompt`, `-s/--select <item>`, `-x/-y` (position → forces layer-shell
 anchoring), `--align-right`, `--parent-app-id` (app_id becomes `cce-cloud:<parent>`),

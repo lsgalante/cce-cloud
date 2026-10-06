@@ -17,6 +17,70 @@ use serde::Deserialize;
 /// rung of the spacing ladder.
 const CLIP_SLACK: f32 = 4.0;
 
+/// A button's glyphs, by cce-ui's context-menu conventions, so a JSON menu
+/// shows its marks and page turns the way every other menu in the DE does:
+///
+/// - a label that BEGINS with `MARK_CHECK` ("✓ "), `MARK_ON` ("● ") or
+///   `MARK_OFF` ("○ ") wears the check, circle or circle-outline glyph at
+///   its left, and the text is drawn without the mark;
+/// - a button with a `target_page` LOWER than its own page turns back, and
+///   wears the chevron-left glyph at its left; one with any other target
+///   leads to a page, and wears the chevron-right glyph at its right end.
+///
+/// Returns `(left glyph, label without its mark, right glyph)`. Every
+/// argument is in the protocol already, so a layout written before the
+/// glyphs needs nothing new — though one that spelled its own marks ("< ",
+/// " >", "[x] ") would now show them twice, which is why the DE's scripts
+/// were rewritten with this.
+pub fn button_glyphs(
+    text: &str,
+    page_idx: usize,
+    target_page: Option<usize>,
+) -> (Option<&'static str>, &str, Option<&'static str>) {
+    let (mark, text) = cce_ui::widget::context_menu::split_mark(text);
+    match target_page {
+        Some(t) if t < page_idx => (Some("chevron-left"), text, None),
+        Some(_) => (mark, text, Some("chevron-right")),
+        None => (mark, text, None),
+    }
+}
+
+/// The side of a mark glyph, and the gap after it, at button font size
+/// `size` — cce-ui's context-menu proportions: a mark about as tall as a
+/// capital, a chevron smaller, since it points rather than labels.
+fn mark_side(size: f32) -> f32 {
+    (size * 0.95).round()
+}
+fn chevron_side(size: f32) -> f32 {
+    (size * 0.8).round()
+}
+const GLYPH_GAP: f32 = 6.0;
+/// Where a capital's middle stands in a line box, as a share of the font
+/// size from its top: what a glyph beside the text is centred on.
+const CAP_MIDDLE: f32 = 0.66;
+
+/// The room a button's glyphs take beside its text: the left column (on
+/// every button of a page where any button has a left glyph, so the labels
+/// share one edge) and the right chevron.
+pub fn glyph_room(lead_column: bool, trail: bool, size: f32) -> f32 {
+    let lead = if lead_column { mark_side(size) + GLYPH_GAP } else { 0.0 };
+    let trail = if trail { GLYPH_GAP + chevron_side(size) } else { 0.0 };
+    lead + trail
+}
+
+/// The button font's size, which a glyph is sized from.
+pub fn button_font_size() -> f32 {
+    cce_ui::layout::parse_font_string(&cce_ui::layout::button_font()).1.unwrap_or(12.0)
+}
+
+/// Whether a page's buttons reserve the left glyph column: any one of them
+/// has a left glyph.
+pub fn page_has_lead(widgets: &[JsonWidgetConfig], page_idx: usize) -> bool {
+    widgets
+        .iter()
+        .any(|w| w.widget_type == "button" && button_glyphs(&w.text, page_idx, w.target_page).0.is_some())
+}
+
 #[derive(Deserialize, Debug, Clone)]
 pub struct JsonWidgetConfig {
     #[serde(rename = "type")]
@@ -110,6 +174,13 @@ pub struct JsonWidget {
     pub label_text: Option<TextLabel>,
     pub page_idx: usize,
     pub target_page: Option<usize>,
+    /// A button's glyphs (see [`button_glyphs`]); `text` is the label
+    /// without its mark.
+    pub lead: Option<&'static str>,
+    pub trail: Option<&'static str>,
+    /// Whether this button reserves the left glyph column ([`page_has_lead`]).
+    pub lead_column: bool,
+    pub justify: Justification,
 }
 
 pub struct JsonLayoutWidget {
@@ -135,10 +206,16 @@ impl JsonLayoutWidget {
             for (page_idx, page) in pages_conf.iter().enumerate() {
                 page_titles.push(page.title.clone());
                 let page_justify = page.justify.unwrap_or(Justification::Center);
+                let lead_column = page_has_lead(&page.widgets, page_idx);
                 for (idx, w_conf) in page.widgets.iter().enumerate() {
                     let id = w_conf.id.clone().unwrap_or_else(|| format!("widget_{}_{}", page_idx, idx));
                     let widget_type = w_conf.widget_type.clone();
-                    let text = w_conf.text.clone();
+                    let (lead, text, trail) = if widget_type == "button" {
+                        button_glyphs(&w_conf.text, page_idx, w_conf.target_page)
+                    } else {
+                        (None, w_conf.text.as_str(), None)
+                    };
+                    let text = text.to_string();
 
                     let widget: JsonControl = match widget_type.as_str() {
                         "checkbox" => {
@@ -202,15 +279,25 @@ impl JsonLayoutWidget {
                         label_text: None,
                         page_idx,
                         target_page: w_conf.target_page,
+                        lead,
+                        trail,
+                        lead_column: lead_column && w_conf.widget_type == "button",
+                        justify: page_justify,
                     });
                 }
             }
         } else if let Some(ref widgets_conf) = config.widgets {
             let global_justify = config.justify.unwrap_or(Justification::Center);
+            let lead_column = page_has_lead(widgets_conf, 0);
             for (idx, w_conf) in widgets_conf.iter().enumerate() {
                 let id = w_conf.id.clone().unwrap_or_else(|| format!("widget_{}", idx));
                 let widget_type = w_conf.widget_type.clone();
-                let text = w_conf.text.clone();
+                let (lead, text, trail) = if widget_type == "button" {
+                    button_glyphs(&w_conf.text, 0, w_conf.target_page)
+                } else {
+                    (None, w_conf.text.as_str(), None)
+                };
+                let text = text.to_string();
 
                 let widget: JsonControl = match widget_type.as_str() {
                     "checkbox" => {
@@ -274,6 +361,10 @@ impl JsonLayoutWidget {
                     label_text: None,
                     page_idx: 0,
                     target_page: w_conf.target_page,
+                    lead,
+                    trail,
+                    lead_column: lead_column && w_conf.widget_type == "button",
+                    justify: global_justify,
                 });
             }
         }
@@ -642,7 +733,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         // Children through the real paint walk, geometry only: bevel/recess/plate prims
         // survive to the tessellator where the old quad bridges flattened them to fills.
         // Text prims are skipped — every label, container-owned and child-owned alike,
-        // is served by `own_labels_with_bounds` below, and emitting the children's own
+        // is served by `labels_and_glyphs` below, and emitting the children's own
         // labels here as well would double them. Page filtering and the panel clip
         // mirror the dissolved `aggregate_quads` bounds.
         let (bx, by, bw, bh) = self.rect();
@@ -740,7 +831,16 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
                 pc.recess_edges(rect, (0.0, 0.0, 0.0, 0.0), seam_d, (true, false, true, false));
             });
         }
-        for (tl, bounds) in self.own_labels_with_bounds(&dummy) {
+        let (labels, glyphs) = self.labels_and_glyphs(&dummy);
+        // The buttons' glyphs (see `button_glyphs`), tinted the label's own
+        // colour. A missing icon set draws nothing in their place: the label
+        // beside each is the word it always was.
+        pc.clip(clip, |pc| {
+            for (name, rect, color) in glyphs {
+                pc.icon(name, rect, color);
+            }
+        });
+        for (tl, bounds) in labels {
             pc.text_with(tl.text, tl.x, tl.y, tl.font_size, tl.color, None, bounds);
         }
     }
@@ -762,47 +862,100 @@ impl cce_ui::widget::Input for JsonLayoutWidget {
     }
 }
 
-impl JsonLayoutWidget {
-    pub(crate) fn own_labels_with_bounds(&self, ctx: &UiContext) -> Vec<(TextLabel, Option<[f32; 4]>)> {
-        let mut labels = Vec::new();
-        let (bx, by, bw, bh) = self.rect();
+/// A glyph to draw: its cce-icons name, rect and tint.
+type GlyphPrim = (&'static str, cce_ui::scene::layout::Rect, [f32; 4]);
 
-        let active_page = self.active_page;
+impl JsonLayoutWidget {
+    /// Every label on the active page, moved aside for its button's glyphs,
+    /// and the glyphs themselves. A glyph is placed off its label — it is
+    /// sized from the label's font and tinted its colour, and the left one
+    /// stands where the label would have started (left-justified; centred,
+    /// label and glyph are centred together).
+    pub(crate) fn labels_and_glyphs(&self, ctx: &UiContext) -> (Vec<(TextLabel, Option<[f32; 4]>)>, Vec<GlyphPrim>) {
+        let mut labels = Vec::new();
+        let mut glyphs = Vec::new();
+        let (bx, by, bw, bh) = self.rect();
         let pad_x = cce_ui::layout::root_plate_inset();
         let content_bounds = Some([bx + pad_x - CLIP_SLACK, by, bx + bw, by + bh]);
-
         for w in &self.widgets {
-            if w.page_idx != active_page {
+            if w.page_idx != self.active_page {
                 continue;
             }
-            let w_labels = if w.widget_type == "checkbox" {
-                if let Some(tl) = &w.label_text {
-                    vec![tl.clone()]
-                } else {
-                    Vec::new()
-                }
-            } else {
-                // The trait text getters are gone: read the child's text off the paint
-                // walk (same prims, fonts dropped — this consumer shapes with its own
-                // control font, as the legacy getter path did).
-                let mut scratch = cce_ui::scene::paint::PaintCtx::new();
-                cce_ui::scene::painter::append_widget_text(ctx, w.widget.as_dyn(), &mut scratch);
-                scratch
-                    .finish()
-                    .items
-                    .into_iter()
-                    .filter_map(|item| match item.prim {
-                        cce_ui::scene::paint::Prim::Text { text, x, y, font_size, color, .. } => {
-                            Some(TextLabel { text, x, y, font_size, color })
-                        }
-                        _ => None,
-                    })
-                    .collect()
-            };
-            for l in w_labels {
-                labels.push((l, content_bounds));
-            }
+            let mut wl = self.widget_labels(ctx, w);
+            self.place_glyphs(w, wl.first_mut(), &mut glyphs);
+            labels.extend(wl.into_iter().map(|l| (l, content_bounds)));
         }
-        labels
+        (labels, glyphs)
+    }
+
+    /// A button's glyphs, placed off its label `tl` (which moves aside for
+    /// the left glyph column).
+    fn place_glyphs(&self, w: &JsonWidget, tl: Option<&mut TextLabel>, glyphs: &mut Vec<GlyphPrim>) {
+        use cce_ui::scene::layout::Rect;
+        if w.widget_type != "button" {
+            return;
+        }
+        let Some(tl) = tl else { return };
+        let size = tl.font_size;
+        let color = [tl.color[0] as f32 / 255.0, tl.color[1] as f32 / 255.0, tl.color[2] as f32 / 255.0, 1.0];
+        let column = if w.lead_column { mark_side(size) + GLYPH_GAP } else { 0.0 };
+        // Level with the text's capitals, not with the row: the button sets
+        // its label a little below the row's middle, and a capital's middle
+        // stands below its line box's (measured in a shadow: the line box's
+        // middle put the glyphs 2 px high at the 12 px button font).
+        let mid = tl.y + size * CAP_MIDDLE;
+        // Where the left column starts, and the label moved aside for it.
+        let col_x = match w.justify {
+            Justification::Left => {
+                let x = tl.x;
+                tl.x += column;
+                x
+            }
+            Justification::Center => {
+                let x = tl.x - column / 2.0;
+                tl.x += column / 2.0;
+                x
+            }
+            Justification::Right => tl.x - column,
+        };
+        if let Some(name) = w.lead {
+            let side = if name == "chevron-left" { chevron_side(size) } else { mark_side(size) };
+            let rect = Rect {
+                x: col_x + (mark_side(size) - side) / 2.0,
+                y: mid - side / 2.0,
+                width: side,
+                height: side,
+            };
+            glyphs.push((name, rect, color));
+        }
+        if let Some(name) = w.trail {
+            let side = chevron_side(size);
+            // The button's own text inset from its right edge.
+            let rect = Rect { x: w.x + w.w - 8.0 - side, y: mid - side / 2.0, width: side, height: side };
+            glyphs.push((name, rect, color));
+        }
+    }
+
+    /// One widget's labels, read off the paint walk.
+    fn widget_labels(&self, ctx: &UiContext, w: &JsonWidget) -> Vec<TextLabel> {
+        if w.widget_type == "checkbox" {
+            return w.label_text.iter().cloned().collect();
+        }
+        // The trait text getters are gone: read the child's text off the paint
+        // walk (same prims, fonts dropped — this consumer shapes with its own
+        // control font, as the legacy getter path did).
+        let mut scratch = cce_ui::scene::paint::PaintCtx::new();
+        cce_ui::scene::painter::append_widget_text(ctx, w.widget.as_dyn(), &mut scratch);
+        scratch
+            .finish()
+            .items
+            .into_iter()
+            .filter_map(|item| match item.prim {
+                cce_ui::scene::paint::Prim::Text { text, x, y, font_size, color, .. } => {
+                    Some(TextLabel { text, x, y, font_size, color })
+                }
+                _ => None,
+            })
+            .collect()
     }
 }
