@@ -3750,6 +3750,8 @@ fn run_standalone() {
     }).unwrap();
 
     let mut last_tick = std::time::Instant::now();
+    // A popup opens animating (its expand); the first ticks say when it stops.
+    let mut animating = true;
     loop {
         // The compositor is dissolving the popup out; hold the surface open
         // until its deadline, then go. Nothing to redraw in the meantime —
@@ -3760,10 +3762,17 @@ fn run_standalone() {
             }
         }
 
+        // Frame rate only while something moved last turn (a layout
+        // animation, the scrollbar's hold, a wheel glide); otherwise sleep
+        // until an event — input, the client's lines, a new request on the
+        // daemon socket all wake the loop — or the fade's deadline. Until
+        // 2026-10-06 an open popup woke every 16 ms with nothing moving.
         let timeout = if app.redraw {
-            std::time::Duration::from_millis(0)
+            Some(std::time::Duration::from_millis(0))
+        } else if animating {
+            Some(std::time::Duration::from_millis(16))
         } else {
-            std::time::Duration::from_millis(16)
+            app.fade_until.map(|t| t.saturating_duration_since(std::time::Instant::now()))
         };
         if let Err(e) = event_loop.dispatch(timeout, &mut app) {
             log::error!("compositor connection lost: {e}");
@@ -3780,21 +3789,25 @@ fn run_standalone() {
         if dt > 0.1 {
             dt = 0.1;
         }
+        animating = false;
         if let Some(state) = &mut app.state {
             if let Some(jl) = &mut state.json_layout {
                 if jl.tick(dt, &mut state.ui_context) {
                     app.redraw = true;
+                    animating = true;
                 }
             }
             // Raise/sink upkeep for the list scrollbar (true while the
             // post-scroll hold runs or on the depth flip).
             if state.fuzzel.scroll_box.tick(dt) {
                 app.redraw = true;
+                animating = true;
             }
             // A wheel glide moves the rows under a stationary pointer.
             if state.fuzzel.refresh_hover() {
                 state.upload_vertices();
                 app.redraw = true;
+                animating = true;
             }
         }
 
@@ -4367,6 +4380,7 @@ fn run_daemon(socket_path: &str) {
         log::debug!("[timing] request -> popup ready: {:?}", t_request.elapsed());
         let mut first_frame_logged = false;
         let mut last_tick = std::time::Instant::now();
+        let mut animating = true;
         while !app.exit {
             // The compositor is dissolving the popup out; hold the surface open
             // until its deadline, then go. Nothing to redraw in the meantime —
@@ -4377,10 +4391,17 @@ fn run_daemon(socket_path: &str) {
                 }
             }
 
+            // Frame rate only while something moved last turn (a layout
+            // animation, the scrollbar's hold, a wheel glide); otherwise sleep
+            // until an event — input, the client's lines, a new request on the
+            // daemon socket all wake the loop — or the fade's deadline. Until
+            // 2026-10-06 an open popup woke every 16 ms with nothing moving.
             let timeout = if app.redraw {
-                std::time::Duration::from_millis(0)
+                Some(std::time::Duration::from_millis(0))
+            } else if animating {
+                Some(std::time::Duration::from_millis(16))
             } else {
-                std::time::Duration::from_millis(16)
+                app.fade_until.map(|t| t.saturating_duration_since(std::time::Instant::now()))
             };
             if let Err(e) = event_loop.dispatch(timeout, &mut app) {
                 let _ = stream.write_all(b"\n");
@@ -4405,21 +4426,25 @@ fn run_daemon(socket_path: &str) {
             if dt > 0.1 {
                 dt = 0.1;
             }
+            animating = false;
             if let Some(st) = &mut app.state {
                 if let Some(jl) = &mut st.json_layout {
                     if jl.tick(dt, &mut st.ui_context) {
                         app.redraw = true;
+                        animating = true;
                     }
                 }
                 // Raise/sink upkeep for the list scrollbar (true while the
                 // post-scroll hold runs or on the depth flip).
                 if st.fuzzel.scroll_box.tick(dt) {
                     app.redraw = true;
+                    animating = true;
                 }
                 // A wheel glide moves the rows under a stationary pointer.
                 if st.fuzzel.refresh_hover() {
                     st.upload_vertices();
                     app.redraw = true;
+                    animating = true;
                 }
             }
 
