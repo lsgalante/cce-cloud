@@ -232,7 +232,18 @@ startup on a scratch surface that is never mapped, so the first popup attaches
 too. Until 2026-10-05 every popup built a new renderer, and its pipelines were
 70-100 ms of a ~100 ms popup on an idle machine and several hundred under
 load; a reopen is now one swapchain, and a menu popup is ready in ~2 ms and on
-screen in 15-40 ms, the launcher in 30-60. An image uploaded to it lives as
+screen in 15-40 ms, the launcher in 30-60. **A popup draws nothing before its
+surface's first configure** (`State::configured`, checked in `State::render`):
+a buffer attached ahead of a layer surface's configure is a protocol error,
+and the compositor disconnects the daemon, and with it every popup after.
+The renderer used to take long enough to build that the configure always
+won; once it was kept, the Super-Tab switcher's streamed rows asked for a
+frame first and killed the daemon on its first open (fixed the same day,
+before it reached a release that stayed installed). Note a shadow's idle
+timeout turns its output off after 10 minutes, after which xdg toplevels
+(the launcher) are never configured at all; `ccectl idle timeouts 0 0`
+first. `open -> first frame with rows` is logged for list popups: a
+streamed list's first frame can be empty. An image uploaded to it lives as
 long as it does: upload through a cache like `icon_image`, never per popup,
 or free it at close. Standalone mode still builds its own.
 

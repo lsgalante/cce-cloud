@@ -1719,6 +1719,20 @@ struct State {
     /// app_id → icon name for the switcher's rows ([`desktop_icon_index`]),
     /// built on the first row that needs it and kept for the popup's life.
     switcher_icon_index: Option<std::collections::HashMap<String, String>>,
+    /// When `State::new` began, and whether the first frame that shows any
+    /// rows has been logged since. A streamed list (Dmenu, the switcher)
+    /// arrives after the popup opens, so the first frame alone can be an
+    /// empty list; this is the one that shows the user something to pick.
+    opened_at: std::time::Instant,
+    rows_frame_logged: bool,
+    /// Whether the compositor has configured the surface yet. Nothing may be
+    /// drawn before: a buffer attached ahead of a layer surface's first
+    /// configure is a protocol error, and the compositor disconnects the
+    /// whole client, which for the daemon is every popup after it. Until
+    /// 2026-10-05 the renderer took long enough to build that the configure
+    /// always won; with the daemon's kept renderer a popup is ready in
+    /// microseconds, and the switcher's streamed rows asked for a frame first.
+    configured: bool,
     last_tick: std::time::Instant,
     ui_context: cce_ui::context::UiContext,
     /// Dissolved root plate container (Phase 6as): the plate was a pure value-holder for the
@@ -2102,6 +2116,9 @@ impl State {
             select_item,
             switcher_mode,
             switcher_icon_index: None,
+            opened_at: t_start,
+            rows_frame_logged: false,
+            configured: false,
             last_tick: std::time::Instant::now(),
             ui_context: cce_ui::context::UiContext::new(),
             window_rect,
@@ -2195,7 +2212,9 @@ impl State {
         if new.is_empty() {
             return;
         }
+        let t = std::time::Instant::now();
         let index = index.get_or_insert_with(|| desktop_icon_index(&application_dirs()));
+        log::debug!("[timing] switcher icon index: {:?}", t.elapsed());
         let icons: Vec<(String, (u32, u32, u32))> = new
             .into_iter()
             .filter_map(|item| {
@@ -2465,7 +2484,13 @@ impl State {
         }
     }
 
+    /// Draw a frame, or nothing before the surface's first configure (see
+    /// `State::configured`): true if a frame was drawn. The configure
+    /// handlers ask for a redraw, so a skipped frame is drawn right after it.
     fn render(&mut self) -> bool {
+        if !self.configured {
+            return false;
+        }
         let now = std::time::Instant::now();
         self.last_tick = now;
 
@@ -2481,7 +2506,11 @@ impl State {
             // Always a full frame: the popup is small and repaints whole.
             damage: None,
         });
-        false
+        if !self.rows_frame_logged && !self.fuzzel.filtered_items.is_empty() {
+            self.rows_frame_logged = true;
+            log::info!("[timing] open -> first frame with rows: {:?}", self.opened_at.elapsed());
+        }
+        true
     }
 }
 
@@ -3158,6 +3187,7 @@ impl LayerShellHandler for AppState {
             let pw = (width as f64 * state.scale) as u32;
             let ph = (height as f64 * state.scale) as u32;
             state.resize(pw, ph);
+            state.configured = true;
         }
         self.redraw = true;
     }
@@ -3172,6 +3202,9 @@ impl WindowHandler for AppState {
         configure: WindowConfigure,
         _serial: u32,
     ) {
+        if let Some(state) = &mut self.state {
+            state.configured = true;
+        }
         let (w, h) = configure.new_size;
         if let (Some(w), Some(h)) = (w, h) {
             let width = w.get();
@@ -4375,8 +4408,7 @@ fn run_daemon(socket_path: &str) {
             if app.redraw {
                 app.redraw = false;
                 if let Some(st) = &mut app.state {
-                    let _ = st.render();
-                    if !first_frame_logged {
+                    if st.render() && !first_frame_logged {
                         first_frame_logged = true;
                         log::info!("[timing] request -> first frame: {:?}", t_request.elapsed());
                     }
