@@ -128,11 +128,13 @@ bound with plain `get_keyboard`, and a held Backspace deleted one character.
   an absolute path, missing, or a generic name several apps share — see
   `cce-icons/hicolor/README.md`. Overrides named after the `Icon=` value need
   nothing here: the user's data dir is the theme search's first base dir.
-  Icons are uploaded per popup (`cce_ui::icon::upload_themed` caches the
-  decode, not the image id), and the daemon frees them with
-  `cce_ui::vk::free_image` when the popup closes: the renderer outlives the
-  popup (see "One renderer for every popup" below), so an upload nobody freed
-  would stay on the GPU for the daemon's life.
+  Icons are uploaded once per renderer, not per popup: `icon_image` caches
+  the image id by icon name for as long as `cce_ui::vk::renderer_epoch` holds,
+  which in the daemon is its whole life (see "One renderer for every popup"
+  below), and the daemon warms it from a thread at startup. Uploading per
+  popup cost a synchronous GPU copy per icon at the first frame and a
+  device-idle wait per free at the next: ~90 stalls for 46 icons, most of the
+  launcher's time to first frame until 2026-10-05.
   Apps is also the one **tabbed** mode: the list carries an *Apps* page and a
   *System* page of DE verbs (`SYSTEM_COMMANDS` — window-manager actions through
   `ccectl`, plus session/power commands), and **Tab / Shift+Tab step between
@@ -230,8 +232,9 @@ startup on a scratch surface that is never mapped, so the first popup attaches
 too. Until 2026-10-05 every popup built a new renderer, and its pipelines were
 70-100 ms of a ~100 ms popup on an idle machine and several hundred under
 load; a reopen is now one swapchain, and a menu popup is ready in ~2 ms and on
-screen in 15-40 ms. Anything a popup uploads to it (icons) must be freed at
-close for the same reason. Standalone mode still builds its own.
+screen in 15-40 ms, the launcher in 30-60. An image uploaded to it lives as
+long as it does: upload through a cache like `icon_image`, never per popup,
+or free it at close. Standalone mode still builds its own.
 
 Surface choice: an XDG toplevel flagged as popup via the cce window-management
 protocol when the compositor global is present and no `-x/-y` was given; otherwise a

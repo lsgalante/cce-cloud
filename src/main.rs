@@ -925,6 +925,42 @@ pub struct TabPage {
 /// keeps from the selection chip's edge.
 const ICON_PX: f32 = 26.0;
 
+/// The pixel size row icons are rasterized at: twice [`ICON_PX`], for a
+/// scale-2 output.
+const ICON_RASTER_PX: u32 = ICON_PX as u32 * 2;
+
+/// A row icon's image, uploaded once per renderer: `(id, width, height)`, or
+/// `None` when the theme has no such icon. The daemon keeps one renderer for
+/// its whole life, so the launcher's icons are uploaded on its first open (or
+/// by the startup warm-up, `run_daemon`) and every later open draws the same
+/// images. Uploading per popup cost a synchronous GPU copy per icon at the
+/// first frame, plus a device-idle wait per free at the next one: ~90 stalls
+/// for 46 icons, most of the launcher's time to first frame.
+///
+/// The cache follows [`cce_ui::vk::renderer_epoch`]: a different renderer
+/// means none of the ids name anything, so they are dropped and uploaded
+/// again. Thread-safe, because the warm-up runs off the main thread.
+fn icon_image(name: &str) -> Option<(u32, u32, u32)> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    type Cache = (u32, HashMap<String, Option<(u32, u32, u32)>>);
+    static CACHE: Mutex<Option<Cache>> = Mutex::new(None);
+
+    let epoch = cce_ui::vk::renderer_epoch();
+    let mut guard = CACHE.lock().unwrap();
+    let (cached_epoch, ids) = guard.get_or_insert_with(|| (epoch, HashMap::new()));
+    if *cached_epoch != epoch {
+        *cached_epoch = epoch;
+        ids.clear();
+    }
+    if let Some(hit) = ids.get(name) {
+        return *hit;
+    }
+    let img = cce_ui::icon::upload_themed(name, ICON_RASTER_PX);
+    ids.insert(name.to_string(), img);
+    img
+}
+
 /// The list chrome's metrics. The spacing around them — the inset from the
 /// popup edge, the gap under the tab strip and under the search well, the
 /// text inset inside a well or a row — is the toolkit's ladder
@@ -1964,17 +2000,14 @@ impl State {
             sort_apps_by_history(&mut apps);
             let app_names: Vec<String> = apps.iter().map(|app| app.name.clone()).collect();
 
-            // Resolve every entry's Icon= against the icon theme. Uploads are
-            // per-popup, and the daemon frees them when the popup closes (the
-            // renderer itself is kept). Only the decode is cached (see
-            // cce_ui::icon::upload_themed), so the second open of the launcher
-            // skips the disk and the rasterizer.
+            // Resolve every entry's Icon= against the icon theme. Each icon is
+            // uploaded once for the daemon's life (see `icon_image`), so after
+            // the first open this is a map lookup per entry.
             let t_icons = std::time::Instant::now();
             let icons: std::collections::HashMap<String, (u32, u32, u32)> = apps
                 .iter()
                 .filter_map(|app| {
-                    let name = app.icon.as_deref()?;
-                    let img = cce_ui::icon::upload_themed(name, ICON_PX.ceil() as u32 * 2)?;
+                    let img = icon_image(app.icon.as_deref()?)?;
                     Some((app.name.clone(), img))
                 })
                 .collect();
@@ -2151,8 +2184,8 @@ impl State {
 
     /// Give the switcher's window rows their app's icon. Rows stream in over
     /// stdin, so this runs per ingest and only resolves the rows that don't
-    /// have an icon yet. Uploads are per-popup, like Apps mode's (see
-    /// `State::new`). `index` is `State::switcher_icon_index`.
+    /// have an icon yet. Each icon is uploaded once and shared with the
+    /// launcher (`icon_image`). `index` is `State::switcher_icon_index`.
     fn resolve_switcher_icons(
         fuzzel: &mut FuzzelWidget,
         index: &mut Option<std::collections::HashMap<String, String>>,
@@ -2167,7 +2200,7 @@ impl State {
             .into_iter()
             .filter_map(|item| {
                 let name = icon_name_for_app_id(index, split_switcher_row(item).1);
-                let img = cce_ui::icon::upload_themed(&name, ICON_PX.ceil() as u32 * 2)?;
+                let img = icon_image(&name)?;
                 Some((item.clone(), img))
             })
             .collect();
@@ -3948,6 +3981,26 @@ fn run_daemon(socket_path: &str) {
     };
     log::info!("[timing] daemon renderer prewarm: {:?}", t_renderer.elapsed());
 
+    // Decode and queue the launcher's icons now, off the main thread, so its
+    // first open does not read and rasterize every one (~350 ms). The uploads
+    // drain into the renderer at the first popup's first frame. An open that
+    // starts before this finishes simply shares the cache with it.
+    if renderer_slot.is_some() {
+        std::thread::spawn(|| {
+            let t = std::time::Instant::now();
+            let apps = scan_apps();
+            let resolved = apps
+                .iter()
+                .filter(|app| app.icon.as_deref().and_then(icon_image).is_some())
+                .count();
+            log::info!(
+                "[timing] launcher icon prewarm: {resolved} of {} in {:?}",
+                apps.len(),
+                t.elapsed()
+            );
+        });
+    }
+
     let scale = cce_ui::wayland::detect_scale_factor(&app.output_state);
     let xdg_shell_state = smithay_client_toolkit::shell::xdg::XdgShell::bind(&globals, &qh).ok();
 
@@ -4361,12 +4414,7 @@ fn run_daemon(socket_path: &str) {
             fonts_slot = Some((fs, sc));
             // Keep the renderer for the next popup, detached now: the State's
             // drop below destroys this wl_surface, and the swapchain must not
-            // outlive it. Its images outlive the popup too, so free the row
-            // icons this popup uploaded (Apps, the switcher) or every open of
-            // the launcher would leave another set on the GPU.
-            for (_, (id, _, _)) in st.fuzzel.icons.drain() {
-                cce_ui::vk::free_image(id);
-            }
+            // outlive it. The row icons stay uploaded with it (`icon_image`).
             if let Some(mut r) = st.renderer.take() {
                 r.detach_surface();
                 renderer_slot = Some(r);
