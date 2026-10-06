@@ -28,6 +28,14 @@ The list's scrollbar/viewport math is the toolkit's `cce_ui::widget::ScrollRegio
 `get_draw_y` its partially-visible-rows contract, which paint, click and hover all
 virtualize on.
 
+Its bar is the DE's one scrollbar (cce-ui's CLAUDE.md, "Every scrollbar rides a
+centre line, behind the plate"): `with_sink_behind(true)`, so it rides the
+list's centre line over the rows, idles under the list's translucent bg fill
+(`push_scrollbar_prims` before the fill, every frame) and fades in over the
+rows while a scroll holds it (`push_scrollbar_fore` after them). Until
+2026-10-06 it sat at the right edge as flat squares on a hard flip, through the
+tuple path (`push_quads` / `push_scrollbar_quads`).
+
 ## Build, test, run
 
 ```sh

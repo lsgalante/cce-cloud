@@ -1425,12 +1425,13 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         let hc = cce_ui::color::highlight_primary_color();
         ctx.recess_tinted(well, (0.0, 0.0, 0.0, 0.0), depth, [hc[0], hc[1], hc[2]]);
 
-        // ScrollBox quads
-        let mut quads = Vec::new();
-        self.scroll_box.push_quads(&mut quads);
-        for (qx, qy, qw, qh, qc) in quads {
-            ctx.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
-        }
+        // The list's scrollbar idles UNDER its translucent bg fill, every
+        // frame: down the list's centre line (the toolkit centres a
+        // sink-behind bar), dimly seen through the fill, taking no press.
+        // The fore copy fades in over the rows below while a scroll holds it.
+        self.scroll_box.push_scrollbar_prims(ctx);
+        let sb = &self.scroll_box;
+        ctx.quad(Rect { x: sb.x, y: sb.y, width: sb.w, height: sb.h }, cce_ui::color::list_bg_color());
 
         // The list content — selection chip, icons, row labels — under the
         // list-viewport clip: `get_draw_y` returns PARTIALLY visible rows (the
@@ -1501,14 +1502,9 @@ impl cce_ui::widget::Paint for FuzzelWidget {
             }
         });
 
-        // The raised scrollbar rides over the rows while a scroll holds it up
-        // (the sunk layer went under the list bg inside push_quads). The bar
-        // was previously never drawn at all — grabbable but invisible.
-        let mut bar = Vec::new();
-        self.scroll_box.push_scrollbar_quads(&mut bar);
-        for (qx, qy, qw, qh, qc) in bar {
-            ctx.quad(Rect { x: qx, y: qy, width: qw, height: qh }, qc);
-        }
+        // The fore copy rides over the rows at the fade, so the raise and the
+        // sink are a fade rather than a flip.
+        self.scroll_box.push_scrollbar_fore(ctx);
 
         // Prompt/query line and the empty-state notice — outside the list clip.
         for l in self.own_labels() {
