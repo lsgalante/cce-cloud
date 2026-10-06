@@ -969,16 +969,14 @@ fn icon_image(name: &str) -> Option<(u32, u32, u32)> {
 /// `let pad = 15.0;` locals in every one of the paint, scroll and hit-test
 /// paths. The tab strip shifts the whole list down by its own height, so the
 /// offset has to be derived in one place or the rows, the clip and the click
-/// go out of step.
-const SEARCH_H: f32 = 35.0;
+/// go out of step. The search well and the tab run are the toolkit's
+/// textbox and button heights (`cce_ui::layout::textbox_height` /
+/// `button_height`), read where they are used.
 const ITEM_H: f32 = 25.0;
 /// Row height once the list carries icons (Apps mode, the window switcher):
 /// the icon plus a 5px standoff above and below. Text-only lists — dmenu,
 /// Path, the System tab — keep the tighter [`ITEM_H`].
 const ICON_ITEM_H: f32 = 36.0;
-/// Height of the tab strip's segmented run; the strip claims this plus one
-/// root-plate gap off the top (see [`FuzzelWidget::tab_strip_h`]).
-const TAB_RUN_H: f32 = 22.0;
 /// style: deliberate — the hairline the selection chip (and the hover wash on
 /// its footprint) stands in from the list viewport on each side, so the chip's
 /// roll clears the clip. A standoff, not a rung of the spacing ladder.
@@ -1092,10 +1090,11 @@ impl FuzzelWidget {
         self.switch_tab(idx)
     }
 
-    /// Height the tab strip takes off the top of the popup — the run and the
-    /// gap between it and the search well; 0 below two tabs.
+    /// Height the tab strip takes off the top of the popup — the run (a
+    /// button's height) and the gap between it and the search well; 0 below
+    /// two tabs.
     pub fn tab_strip_h(&self) -> f32 {
-        if self.tabs.len() > 1 { TAB_RUN_H + cce_ui::layout::root_plate_gap() } else { 0.0 }
+        if self.tabs.len() > 1 { cce_ui::layout::button_height() + cce_ui::layout::root_plate_gap() } else { 0.0 }
     }
 
     /// The segmented run itself, inset from the popup edge like the search
@@ -1106,7 +1105,7 @@ impl FuzzelWidget {
             x: self.x + inset,
             y: self.y + inset,
             width: self.w - inset * 2.0,
-            height: TAB_RUN_H,
+            height: cce_ui::layout::button_height(),
         })
     }
 
@@ -1141,7 +1140,7 @@ impl FuzzelWidget {
     /// Y of the list viewport's top edge — the number the scroll math, the row
     /// hit-test, the clip and the empty-state label all have to agree on.
     fn list_y(&self) -> f32 {
-        self.search_y() + SEARCH_H + cce_ui::layout::root_plate_gap()
+        self.search_y() + cce_ui::layout::textbox_height() + cce_ui::layout::root_plate_gap()
     }
 
     /// Height of the list viewport: everything left between it and the bottom
@@ -1161,7 +1160,7 @@ impl FuzzelWidget {
     /// well and the gap under it, and the tab strip when there is one. What
     /// the popup's height is over its rows.
     pub fn chrome_h(&self) -> f32 {
-        2.0 * cce_ui::layout::root_plate_inset() + self.tab_strip_h() + SEARCH_H + cce_ui::layout::root_plate_gap()
+        2.0 * cce_ui::layout::root_plate_inset() + self.tab_strip_h() + cce_ui::layout::textbox_height() + cce_ui::layout::root_plate_gap()
     }
 
     /// Horizontal chrome around a row's text: the text inset on both sides.
@@ -1418,7 +1417,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         // highlight accent (the toolkit's focused-well treatment; the query
         // line always holds keyboard focus here). Replaces the flat fill +
         // 1px border quads.
-        let search_h = SEARCH_H;
+        let search_h = cce_ui::layout::textbox_height();
         let well = Rect { x: self.x + pad, y: self.search_y(), width: self.w - pad * 2.0, height: search_h };
         ctx.quad(well, [0.10, 0.10, 0.14, 1.0]);
         let depth = cce_ui::layout::bevel_width().min(search_h * 0.2);
@@ -1762,9 +1761,9 @@ fn json_widget_desired_width(widget_type: &str, text: &str) -> f32 {
         }
         "label" => cce_ui::widget::display::measure_text(text, 13.0) + margins,
         // The remainders are each control's own width beside its label (the
-        // checkbox's box column, the spinbox's field, the slider's track), not
-        // spacing.
-        "checkbox" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 12.0,
+        // checkbox's toggle-height box and the 10px before its label, the
+        // spinbox's field, the slider's track), not spacing.
+        "checkbox" => cce_ui::widget::display::measure_text(text, 13.0) + margins + cce_ui::layout::toggle_height() + 10.0,
         "spinbox" | "color" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 88.0,
         "slider" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 128.0,
         _ => 150.0,
@@ -1848,10 +1847,10 @@ impl State {
                         for w_conf in widgets {
                             let h = match w_conf.widget_type.as_str() {
                                 "label" => 18.0,
-                                "checkbox" => 22.0,
-                                "button" => 24.0,
-                                "spinbox" => 22.0,
-                                "color" => 24.0,
+                                "checkbox" => cce_ui::layout::toggle_height(),
+                                "button" => cce_ui::widget::context_menu::ROW_H,
+                                "spinbox" => cce_ui::layout::spinbox_height(),
+                                "color" => cce_ui::layout::color_selector_height(),
                                 _ => 20.0,
                             };
                             current_y += h + gap;
@@ -1863,10 +1862,10 @@ impl State {
                             for w_conf in &page.widgets {
                                 let h = match w_conf.widget_type.as_str() {
                                     "label" => 18.0,
-                                    "checkbox" => 22.0,
-                                    "button" => 24.0,
-                                    "spinbox" => 22.0,
-                                    "color" => 24.0,
+                                    "checkbox" => cce_ui::layout::toggle_height(),
+                                    "button" => cce_ui::widget::context_menu::ROW_H,
+                                    "spinbox" => cce_ui::layout::spinbox_height(),
+                                    "color" => cce_ui::layout::color_selector_height(),
                                     _ => 20.0,
                                 };
                                 page_y += h + gap;
@@ -4854,10 +4853,10 @@ mod tests {
         assert_eq!(w_label_h, 18.0);
 
         assert_eq!(w_check_y, inset + 18.0 + gap); // y_prev + h_prev + spacing
-        assert_eq!(w_check_h, 22.0);
+        assert_eq!(w_check_h, cce_ui::layout::toggle_height());
 
-        assert_eq!(w_btn_y, w_check_y + 22.0 + gap);
-        assert_eq!(w_btn_h, 24.0);
+        assert_eq!(w_btn_y, w_check_y + w_check_h + gap);
+        assert_eq!(w_btn_h, cce_ui::widget::context_menu::ROW_H);
 
         // Check horizontal positioning (should match usable width: 300 - 2 * inset)
         let usable_w = 300.0 - 2.0 * inset;
@@ -5354,7 +5353,8 @@ impl FuzzelWidget {
         labels.push(TextLabel {
             text: query_text,
             x: self.text_x(),
-            y: self.search_y() + 9.0,
+            // The 14px line centred in the well.
+            y: self.search_y() + (cce_ui::layout::textbox_height() - 17.0) / 2.0,
             font_size: 14.0,
             color: query_color,
         });

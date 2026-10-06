@@ -418,23 +418,28 @@ impl JsonLayoutWidget {
             if w_state.widget_type == "checkbox" {
                 // set_rect is an WidgetHost method; call it on the box directly (the Phase 5
                 // Checkbox is an Adapted widget — as_any downcasts reach the model, not WidgetHost).
-                w_state.widget.as_dyn_mut().set_rect(w_state.x, w_state.y + 2.0, 18.0, 18.0);
-                w_state.h = 22.0;
+                // The toolkit's checkbox row: toggle height, the box square
+                // at it (as a labelled `Checkbox::field` draws it).
+                let h = cce_ui::layout::toggle_height();
+                w_state.widget.as_dyn_mut().set_rect(w_state.x, w_state.y, h, h);
+                w_state.h = h;
                 w_state.label_text = Some(TextLabel {
                     text: w_state.text.clone(),
-                    x: w_state.x + 28.0,
-                    y: w_state.y + 2.0,
+                    x: w_state.x + h + 10.0,
+                    y: w_state.y + (h - 18.0) / 2.0,
                     font_size: 13.0,
                     color: [0xcc, 0xcc, 0xd4],
                 });
             } else {
                 let h = match w_state.widget_type.as_str() {
-                    "button" => 24.0 + top_room,
+                    // Menu-styled rows (`new_menu_item`): the context menu's pitch.
+                    "button" => cce_ui::widget::context_menu::ROW_H + top_room,
                     "label" => 18.0 + top_room,
                     "spinbox" => cce_ui::layout::spinbox_height() + top_room,
                     "color" | "rgb" | "rgba" => cce_ui::layout::color_selector_height() + top_room,
                     "slider" => 22.0 + top_room,
-                    _ => 24.0,
+                    // An unknown type is built as a bare Button.
+                    _ => cce_ui::layout::button_height(),
                 };
                 w_state.widget.as_dyn_mut().set_rect(w_state.x, w_state.y, usable_w, h);
                 w_state.h = h;
