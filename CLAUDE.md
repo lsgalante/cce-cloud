@@ -10,7 +10,7 @@ JSON-defined popup panel — all in one binary. It is one crate of the cce multi
 workspace; workspace-wide conventions (multi-repo layout, no `[workspace.dependencies]`,
 shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that too.
 
-Two source files, all logic in `src/main.rs` (~5.1k lines):
+Two source files, all logic in `src/main.rs` (~5.6k lines):
 
 - `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland
   surface and event loop, `FuzzelWidget` (the list UI: keyboard selection chip,
@@ -95,6 +95,17 @@ needs-stdin decision, in `run_client()`).
 - `Dmenu` — items from stdin, selection echoed out. Magic stdin lines
   `__cce_switcher_next__` / `__cce_switcher_select_and_close__` drive the compositor's
   window switcher (`--switcher` starts in Dmenu with its hold modifier down, and commits when neither Super nor Alt is held, so it works bound to Super+Tab or Alt+Tab; moving the pointer onto a row selects it — `FuzzelWidget::pointer_moved`, motion only, so a popup mapping under a resting pointer does not steal the row Super+Tab advanced to).
+- `--choose` — the **app chooser** ("Open with…") behind the AppChooser portal
+  (cce-desktop-portal spawns `cce-cloud --choose [-p prompt] [-s last_id]`).
+  Dmenu mode with a different feed and answer: stdin carries desktop-file IDs,
+  each row shows that entry's `Name=` and icon (`desktop_entry_label`, NoDisplay
+  entries included — the portal's handler list is authoritative), and the pick
+  is printed back as the ID, not the label (`Chooser::answer`). `-s` takes an
+  ID too. Two entries sharing a name get `Name (id)` labels so every row maps
+  back to one app. Escape answers an empty line, which the portal reads as
+  cancelled. `State::new` takes `chooser_mode` because it ingests stdin
+  once itself: state set after construction misses that first feed and
+  shows the raw IDs.
 - `Path` — executables scanned from `$PATH`.
 **Key repeat** is the client's job on Wayland: the keyboard is bound with
 `get_keyboard_with_repeat` on the calloop loop, which re-fires a held key at
@@ -170,7 +181,7 @@ bound with plain `get_keyboard`, and a held Backspace deleted one character.
 
 Key flags: `-p/--prompt`, `-s/--select <item>`, `-x/-y` (position → forces layer-shell
 anchoring), `--align-right`, `--parent-app-id` (app_id becomes `cce-cloud:<parent>`),
-`--switcher`, and mode flags `--apps|--path|--dmenu|--json` (or `--mode <m>`).
+`--switcher`, `--choose`, and mode flags `--apps|--path|--dmenu|--json` (or `--mode <m>`).
 
 ### Tabs
 

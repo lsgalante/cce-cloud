@@ -397,6 +397,75 @@ fn icon_override_in(dir: &std::path::Path, id: &str) -> Option<String> {
     path.is_file().then(|| path.to_string_lossy().into_owned())
 }
 
+/// `Name=` and `Icon=` of the desktop entry with ID `id` (its file stem),
+/// from the first applications dir that has it — NoDisplay entries
+/// included: a handler the portal offers is a valid choice whether or not
+/// the launcher lists it. The icon goes through [`icon_override`] like the
+/// launcher's. `None` when no dir has the entry.
+fn desktop_entry_label(id: &str, dirs: &[std::path::PathBuf]) -> Option<(String, Option<String>)> {
+    let path = dirs.iter().map(|d| d.join(format!("{id}.desktop"))).find(|p| p.is_file())?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let (mut name, mut icon) = (None, None);
+    let mut in_entry = false;
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("Name=") {
+            name.get_or_insert_with(|| v.trim().to_string());
+        } else if let Some(v) = line.strip_prefix("Icon=") {
+            if !v.trim().is_empty() {
+                icon.get_or_insert_with(|| v.trim().to_string());
+            }
+        }
+    }
+    Some((name.unwrap_or_else(|| id.to_string()), icon_override(id).or(icon)))
+}
+
+/// `--choose`: the app chooser the desktop portal opens ("Open with…").
+/// Dmenu mode with a different feed and a different answer: stdin carries
+/// desktop-file IDs, the rows show each one's name and icon, and the choice
+/// is printed back as the ID. Rows are labels, so the label → ID map is
+/// what turns a pick back into the answer.
+#[derive(Default)]
+struct Chooser {
+    /// The IDs last ingested, so an unchanged feed is not re-resolved on
+    /// every poll (the rows hold labels, which never equal the IDs).
+    fed: Vec<String>,
+    by_label: std::collections::HashMap<String, String>,
+}
+
+impl Chooser {
+    /// Labels for `ids`, in order. A name two entries share (two "Firefox"
+    /// builds) is told apart by the ID, so every label maps back to one app.
+    fn labels(ids: &[String], dirs: &[std::path::PathBuf]) -> Vec<(String, String, Option<String>)> {
+        let entries: Vec<(String, String, Option<String>)> = ids
+            .iter()
+            .map(|id| {
+                let (name, icon) = desktop_entry_label(id, dirs).unwrap_or_else(|| (id.clone(), None));
+                (id.clone(), name, icon)
+            })
+            .collect();
+        entries
+            .iter()
+            .map(|(id, name, icon)| {
+                let shared = entries.iter().filter(|(_, n, _)| n == name).count() > 1;
+                let label = if shared { format!("{name} ({id})") } else { name.clone() };
+                (id.clone(), label, icon.clone())
+            })
+            .collect()
+    }
+
+    /// What a picked row answers: its ID, or the row itself if unknown.
+    fn answer(&self, row: &str) -> String {
+        self.by_label.get(row).cloned().unwrap_or_else(|| row.to_string())
+    }
+}
+
 fn scan_apps() -> Vec<AppInfo> {
     let mut apps = Vec::new();
     let dirs = application_dirs();
@@ -1711,6 +1780,8 @@ struct State {
     max_height: u32,
     select_item: Option<String>,
     switcher_mode: bool,
+    /// `Some` in `--choose` mode ([`Chooser`]).
+    chooser: Option<Chooser>,
     /// app_id → icon name for the switcher's rows ([`desktop_icon_index`]),
     /// built on the first row that needs it and kept for the popup's life.
     switcher_icon_index: Option<std::collections::HashMap<String, String>>,
@@ -1803,6 +1874,7 @@ impl State {
         scale: f64,
         select_item: Option<String>,
         switcher_mode: bool,
+        chooser_mode: bool,
         json_layout_config: Option<JsonLayoutConfig>,
         parent_app_id: Option<String>,
         fonts: Option<(FontSystem, SwashCache)>,
@@ -2124,6 +2196,7 @@ impl State {
             },
             select_item,
             switcher_mode,
+            chooser: chooser_mode.then(Chooser::default),
             switcher_icon_index: None,
             opened_at: t_start,
             rows_frame_logged: false,
@@ -2166,7 +2239,32 @@ impl State {
                 lock.cycle_prev = 0;
 
                 let mut changed = false;
-                let items = lock.items.clone();
+                let mut items = lock.items.clone();
+                // The chooser's feed is IDs and its rows are labels: resolve a
+                // new feed once, and leave the rows alone on an unchanged one.
+                if let Some(chooser) = self.chooser.as_mut() {
+                    if chooser.fed == items {
+                        items = self.fuzzel.tab_items(0).to_vec();
+                    } else {
+                        let entries = Chooser::labels(&items, &application_dirs());
+                        chooser.fed = items;
+                        chooser.by_label = entries.iter().map(|(id, label, _)| (label.clone(), id.clone())).collect();
+                        // `-s` names the portal's last choice by ID; the row
+                        // it selects is that ID's label.
+                        if let Some(sel) = self.select_item.as_ref() {
+                            if let Some((_, label, _)) = entries.iter().find(|(id, _, _)| id == sel) {
+                                self.select_item = Some(label.clone());
+                            }
+                        }
+                        self.fuzzel.set_item_icons(
+                            entries
+                                .iter()
+                                .filter_map(|(_, label, icon)| Some((label.clone(), icon_image(icon.as_deref()?)?)))
+                                .collect(),
+                        );
+                        items = entries.into_iter().map(|(_, label, _)| label).collect();
+                    }
+                }
                 // Against tab 0's items, not the active tab's: the feed only
                 // ever fills the mode's own list, and comparing against
                 // whatever tab the user is reading would differ every time.
@@ -2600,8 +2698,9 @@ impl AppState {
         if let Some(st) = &mut self.state {
             if !st.fuzzel.filtered_items.is_empty() {
                 if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
-                    self.selected_item = Some(item.clone());
-                    println!("{}", item);
+                    let answer = st.chooser.as_ref().map_or_else(|| item.clone(), |c| c.answer(item));
+                    println!("{}", answer);
+                    self.selected_item = Some(answer);
                     if !run_system_item(&st.fuzzel, item) {
                         match st.mode {
                             LauncherMode::Apps => {
@@ -2930,8 +3029,9 @@ impl PointerHandler for AppState {
                                     let commit = !st.switcher_mode || st.fuzzel.selected == prev_selected;
                                     if commit {
                                         if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
-                                            println!("{}", item);
-                                            self.selected_item = Some(item.clone());
+                                            let answer = st.chooser.as_ref().map_or_else(|| item.clone(), |c| c.answer(item));
+                                            println!("{}", answer);
+                                            self.selected_item = Some(answer);
                                             if !run_system_item(&st.fuzzel, item) {
                                                 match st.mode {
                                                     LauncherMode::Apps => {
@@ -3534,6 +3634,7 @@ fn run_standalone() {
     let mut select_item: Option<String> = None;
     let mut align_right = false;
     let mut switcher_mode = false;
+    let mut chooser_mode = false;
     let mut parent_app_id: Option<String> = None;
 
     let args = std::env::args().skip(1).collect::<Vec<String>>();
@@ -3609,6 +3710,10 @@ fn run_standalone() {
             i += 1;
         } else if arg == "--switcher" {
             switcher_mode = true;
+            mode = LauncherMode::Dmenu;
+            i += 1;
+        } else if arg == "--choose" {
+            chooser_mode = true;
             mode = LauncherMode::Dmenu;
             i += 1;
         } else {
@@ -3709,6 +3814,7 @@ fn run_standalone() {
         scale,
         select_item,
         switcher_mode,
+        chooser_mode,
         json_layout_config,
         parent_app_id,
         None,
@@ -3863,7 +3969,7 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
             needs_stdin = false;
             mode_specified = true;
             i += 1;
-        } else if arg == "--dmenu" || arg == "--json" || arg == "--layout" {
+        } else if arg == "--dmenu" || arg == "--json" || arg == "--layout" || arg == "--choose" {
             needs_stdin = true;
             mode_specified = true;
             i += 1;
@@ -4133,6 +4239,7 @@ fn run_daemon(socket_path: &str) {
         let mut select_item: Option<String> = None;
         let mut align_right = false;
         let mut switcher_mode = false;
+        let mut chooser_mode = false;
         let mut parent_app_id: Option<String> = None;
 
         let mut i = 1;
@@ -4207,6 +4314,10 @@ fn run_daemon(socket_path: &str) {
                 i += 1;
             } else if arg == "--switcher" {
                 switcher_mode = true;
+                mode = LauncherMode::Dmenu;
+                i += 1;
+            } else if arg == "--choose" {
+                chooser_mode = true;
                 mode = LauncherMode::Dmenu;
                 i += 1;
             } else {
@@ -4352,6 +4463,7 @@ fn run_daemon(socket_path: &str) {
             scale,
             select_item,
             switcher_mode,
+            chooser_mode,
             json_layout_config,
             parent_app_id,
             fonts_slot.take(),
@@ -5086,6 +5198,44 @@ mod tests {
         // No override: the caller falls back to the entry's own Icon=.
         assert_eq!(icon_override_in(&dir, "raindropio"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chooser_labels_resolve_ids_and_tell_twins_apart() {
+        let base = std::env::temp_dir().join(format!("cce-cloud-test-choose-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (user, sys) = (base.join("user/applications"), base.join("sys/applications"));
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+        let entry = |name: &str, extra: &str| format!("[Desktop Entry]\nType=Application\nName={name}\nExec=x\n{extra}");
+        std::fs::write(sys.join("org.gnome.Evince.desktop"), entry("Document Viewer", "Icon=evince\n")).unwrap();
+        // NoDisplay: the launcher hides it, the chooser must not.
+        std::fs::write(sys.join("helper.desktop"), entry("Helper", "NoDisplay=true\n")).unwrap();
+        std::fs::write(sys.join("firefox.desktop"), entry("Firefox", "")).unwrap();
+        std::fs::write(sys.join("firefox-nightly.desktop"), entry("Firefox", "")).unwrap();
+        // The user dir shadows the system entry of the same ID.
+        std::fs::write(user.join("helper.desktop"), entry("My Helper", "")).unwrap();
+        // A localized name after the plain one does not replace it.
+        std::fs::write(sys.join("loc.desktop"), entry("Plain", "Name[de]=Lokal\n")).unwrap();
+
+        let dirs = vec![user.clone(), sys.clone()];
+        let ids: Vec<String> = ["org.gnome.Evince", "helper", "firefox", "firefox-nightly", "missing", "loc"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = Chooser::labels(&ids, &dirs);
+        let labels: Vec<&str> = got.iter().map(|(_, l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["Document Viewer", "My Helper", "Firefox (firefox)", "Firefox (firefox-nightly)", "missing", "Plain"]
+        );
+        assert_eq!(got[0].2.as_deref(), Some("evince"));
+
+        let chooser = Chooser { fed: ids.clone(), by_label: got.iter().map(|(id, l, _)| (l.clone(), id.clone())).collect() };
+        assert_eq!(chooser.answer("Firefox (firefox-nightly)"), "firefox-nightly");
+        assert_eq!(chooser.answer("Document Viewer"), "org.gnome.Evince");
+        assert_eq!(chooser.answer("typed text"), "typed text", "an unknown row answers itself");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
