@@ -1,3 +1,4 @@
+use cce_ui::widget::Owned;
 use cce_ui::widget::ScrollRegion;
 
 use std::sync::{Arc, Mutex};
@@ -1759,8 +1760,8 @@ struct State {
     /// launched window on that grid square.
     invoked_at: Option<(i32, i32)>,
 
-    fuzzel: cce_ui::widget::Adapted<FuzzelWidget>,
-    json_layout: Option<cce_ui::widget::Adapted<JsonLayoutWidget>>,
+    fuzzel: Owned<cce_ui::widget::Adapted<FuzzelWidget>>,
+    json_layout: Option<Owned<cce_ui::widget::Adapted<JsonLayoutWidget>>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
 
@@ -2167,8 +2168,8 @@ impl State {
             frame_batches: Vec::new(),
             frame_images: Vec::new(),
             plate_features: Vec::new(),
-            fuzzel,
-            json_layout,
+            fuzzel: Owned::new(fuzzel),
+            json_layout: json_layout.map(Owned::new),
             font_system,
             swash_cache,
             cursor_x: 0.0,
