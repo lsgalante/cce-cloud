@@ -1,4 +1,4 @@
-use cce_ui::widget::Owned;
+use cce_ui::widget::Handle;
 use cce_ui::widget::ScrollRegion;
 
 use std::sync::{Arc, Mutex};
@@ -1760,8 +1760,8 @@ struct State {
     /// launched window on that grid square.
     invoked_at: Option<(i32, i32)>,
 
-    fuzzel: Owned<cce_ui::widget::Adapted<FuzzelWidget>>,
-    json_layout: Option<Owned<cce_ui::widget::Adapted<JsonLayoutWidget>>>,
+    fuzzel: Handle<cce_ui::widget::Adapted<FuzzelWidget>>,
+    json_layout: Option<Handle<cce_ui::widget::Adapted<JsonLayoutWidget>>>,
     font_system: FontSystem,
     swash_cache: SwashCache,
 
@@ -2159,6 +2159,8 @@ impl State {
             (Some(x), Some(y)) => Some((x, y)),
             _ => None,
         };
+        // The context owns the widgets; the app keeps their handles.
+        let mut ui_context = cce_ui::context::UiContext::new();
         let mut state = Self {
             invoked_at,
             window: Some(window),
@@ -2168,8 +2170,8 @@ impl State {
             frame_batches: Vec::new(),
             frame_images: Vec::new(),
             plate_features: Vec::new(),
-            fuzzel: Owned::new(fuzzel),
-            json_layout: json_layout.map(Owned::new),
+            fuzzel: ui_context.insert(fuzzel),
+            json_layout: json_layout.map(|w| ui_context.insert(w)),
             font_system,
             swash_cache,
             cursor_x: 0.0,
@@ -2203,7 +2205,7 @@ impl State {
             rows_frame_logged: false,
             configured: false,
             last_tick: std::time::Instant::now(),
-            ui_context: cce_ui::context::UiContext::new(),
+            ui_context,
             window_rect,
             window_bg: bg_color,
             select_and_close_requested: false,
@@ -2245,7 +2247,7 @@ impl State {
                 // new feed once, and leave the rows alone on an unchanged one.
                 if let Some(chooser) = self.chooser.as_mut() {
                     if chooser.fed == items {
-                        items = self.fuzzel.tab_items(0).to_vec();
+                        items = self.ui_context[self.fuzzel].tab_items(0).to_vec();
                     } else {
                         let entries = Chooser::labels(&items, &application_dirs());
                         chooser.fed = items;
@@ -2257,7 +2259,7 @@ impl State {
                                 self.select_item = Some(label.clone());
                             }
                         }
-                        self.fuzzel.set_item_icons(
+                        self.ui_context[self.fuzzel].set_item_icons(
                             entries
                                 .iter()
                                 .filter_map(|(_, label, icon)| Some((label.clone(), icon_image(icon.as_deref()?)?)))
@@ -2269,35 +2271,35 @@ impl State {
                 // Against tab 0's items, not the active tab's: the feed only
                 // ever fills the mode's own list, and comparing against
                 // whatever tab the user is reading would differ every time.
-                if self.fuzzel.tab_items(0) != items.as_slice() {
+                if self.ui_context[self.fuzzel].tab_items(0) != items.as_slice() {
                     if self.switcher_mode {
                         // Fields, not `self`: the stdin lock guard borrows it.
-                        Self::resolve_switcher_icons(&mut self.fuzzel, &mut self.switcher_icon_index, &items);
+                        Self::resolve_switcher_icons(&mut self.ui_context[self.fuzzel], &mut self.switcher_icon_index, &items);
                     }
-                    self.fuzzel.set_tab_items(0, items);
+                    self.ui_context[self.fuzzel].set_tab_items(0, items);
                     changed = true;
                     if let Some(ref select_name) = self.select_item {
                         let select_lower = select_name.to_lowercase();
-                        if let Some(idx) = self.fuzzel.filtered_items.iter().position(|item| item.to_lowercase() == select_lower) {
-                            self.fuzzel.selected = idx;
-                            self.fuzzel.update_scroll();
-                            self.fuzzel.snap_to_selected();
+                        if let Some(idx) = self.ui_context[self.fuzzel].filtered_items.iter().position(|item| item.to_lowercase() == select_lower) {
+                            self.ui_context[self.fuzzel].selected = idx;
+                            self.ui_context[self.fuzzel].update_scroll();
+                            self.ui_context[self.fuzzel].snap_to_selected();
                             self.select_item = None;
                         }
-                    } else if self.switcher_mode && self.fuzzel.filtered_items.len() > 1 {
-                        self.fuzzel.selected = 1;
-                        self.fuzzel.update_scroll();
-                        self.fuzzel.snap_to_selected();
+                    } else if self.switcher_mode && self.ui_context[self.fuzzel].filtered_items.len() > 1 {
+                        self.ui_context[self.fuzzel].selected = 1;
+                        self.ui_context[self.fuzzel].update_scroll();
+                        self.ui_context[self.fuzzel].snap_to_selected();
                     }
                 }
 
-                if (cycles > 0 || cycles_back > 0) && !self.fuzzel.filtered_items.is_empty() {
-                    let len = self.fuzzel.filtered_items.len() as isize;
+                if (cycles > 0 || cycles_back > 0) && !self.ui_context[self.fuzzel].filtered_items.is_empty() {
+                    let len = self.ui_context[self.fuzzel].filtered_items.len() as isize;
                     let net = cycles as isize - cycles_back as isize;
-                    self.fuzzel.selected =
-                        (self.fuzzel.selected as isize + net).rem_euclid(len) as usize;
-                    self.fuzzel.update_scroll();
-                    self.fuzzel.snap_to_selected();
+                    self.ui_context[self.fuzzel].selected =
+                        (self.ui_context[self.fuzzel].selected as isize + net).rem_euclid(len) as usize;
+                    self.ui_context[self.fuzzel].update_scroll();
+                    self.ui_context[self.fuzzel].snap_to_selected();
                     changed = true;
                 }
 
@@ -2336,7 +2338,7 @@ impl State {
 
     fn update_desired_size(&mut self) {
         if self.mode == LauncherMode::Json {
-            if let Some(ref jl) = self.json_layout {
+            if let Some(jl) = self.json_layout.and_then(|h| self.ui_context.get(h)) {
                 let mut max_widget_w = 120.0f32; // fallback minimum
                 let active_page = jl.active_page;
                 
@@ -2366,18 +2368,18 @@ impl State {
             }
             return;
         }
-        let num_items = self.fuzzel.filtered_items.len();
+        let num_items = self.ui_context[self.fuzzel].filtered_items.len();
         let item_count = if num_items == 0 { 1 } else { num_items };
-        let needed_height = self.fuzzel.chrome_h() + (item_count as f32) * self.fuzzel.item_h();
+        let needed_height = self.ui_context[self.fuzzel].chrome_h() + (item_count as f32) * self.ui_context[self.fuzzel].item_h();
         let target_height = needed_height.min(self.max_height as f32);
 
         // Calculate max text width
         let mut max_text_w: f32 = 0.0;
         
-        let query_text = if self.fuzzel.query.is_empty() {
-            format!("{}{}", self.fuzzel.prompt, "Type to search...")
+        let query_text = if self.ui_context[self.fuzzel].query.is_empty() {
+            format!("{}{}", self.ui_context[self.fuzzel].prompt, "Type to search...")
         } else {
-            format!("{}{}", self.fuzzel.prompt, self.fuzzel.query)
+            format!("{}{}", self.ui_context[self.fuzzel].prompt, self.ui_context[self.fuzzel].query)
         };
         let buf = make_text_buffer(&mut self.font_system, &query_text, 14.0);
         let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
@@ -2385,15 +2387,15 @@ impl State {
             max_text_w = tw;
         }
 
-        if self.fuzzel.filtered_items.is_empty() {
+        if self.ui_context[self.fuzzel].filtered_items.is_empty() {
             let buf = make_text_buffer(&mut self.font_system, "No matches found", 13.0);
             let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
             if tw > max_text_w {
                 max_text_w = tw;
             }
         } else {
-            for item in &self.fuzzel.filtered_items {
-                let label = self.fuzzel.row_label(item);
+            for item in &self.ui_context[self.fuzzel].filtered_items {
+                let label = self.ui_context[self.fuzzel].row_label(item);
                 let buf = make_text_buffer(&mut self.font_system, label, 13.0);
                 let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
                 if tw > max_text_w {
@@ -2406,7 +2408,7 @@ impl State {
         // has to hold its widest title n times over or the narrowest tab
         // clips. (Today it fits inside the 300px floor below; it is measured
         // rather than assumed so adding a third tab cannot quietly break it.)
-        let titles: Vec<String> = self.fuzzel.tabs.iter().map(|t| t.title.clone()).collect();
+        let titles: Vec<String> = self.ui_context[self.fuzzel].tabs.iter().map(|t| t.title.clone()).collect();
         if titles.len() > 1 {
             let mut widest = 0.0f32;
             for title in &titles {
@@ -2423,7 +2425,7 @@ impl State {
         }
 
         let scrollbar_w = if needed_height > self.max_height as f32 { 10.0 } else { 0.0 };
-        let needed_width = max_text_w + self.fuzzel.chrome_w() + self.fuzzel.icon_gutter + scrollbar_w;
+        let needed_width = max_text_w + self.ui_context[self.fuzzel].chrome_w() + self.ui_context[self.fuzzel].icon_gutter + scrollbar_w;
         let target_width = needed_width.clamp(300.0, self.max_width as f32);
 
         self.resize_window(target_width.round() as u32, target_height.round() as u32);
@@ -2462,12 +2464,12 @@ impl State {
         let (w, h) = (self.width, self.height);
         self.window_rect = (0.0, 0.0, w, h);
         if self.mode == LauncherMode::Json {
-            if let Some(jl) = &mut self.json_layout {
+            if let Some(jh) = self.json_layout {
                 cce_ui::scale::set_scale_factor(self.scale as f32);
-                jl.set_rect(0.0, 0.0, w, h);
+                self.ui_context[jh].set_rect(0.0, 0.0, w, h);
             }
         } else {
-            self.fuzzel.set_rect(0.0, 0.0, w, h);
+            self.ui_context[self.fuzzel].set_rect(0.0, 0.0, w, h);
         }
     }
 
@@ -2503,11 +2505,11 @@ impl State {
         // 2. Child widgets, through the paint walk: bevel/recess prims reach the
         // tessellator instead of being flattened away by the legacy quad bridges.
         if self.mode == LauncherMode::Json {
-            if let Some(jl) = &self.json_layout {
+            if let Some(jl) = self.json_layout.and_then(|h| self.ui_context.get(h)) {
                 jl.paint_self(&self.ui_context, &mut pc);
             }
         } else {
-            self.fuzzel.paint_self(&self.ui_context, &mut pc);
+            self.ui_context[self.fuzzel].paint_self(&self.ui_context, &mut pc);
         }
 
         pc.finish()
@@ -2538,11 +2540,11 @@ impl State {
 
         let mut widget_labels: Vec<(TextLabel, Option<[f32; 4]>)> = Vec::new();
         if self.mode == LauncherMode::Json {
-            if let Some(jl) = &self.json_layout {
+            if let Some(jl) = self.json_layout.and_then(|h| self.ui_context.get(h)) {
                 widget_labels.extend(walk_text_labels(&self.ui_context, jl));
             }
         } else {
-            widget_labels.extend(walk_text_labels(&self.ui_context, &self.fuzzel));
+            widget_labels.extend(walk_text_labels(&self.ui_context, &self.ui_context[self.fuzzel]));
         }
 
         let mut buffers: Vec<Buffer> = Vec::with_capacity(widget_labels.len());
@@ -2623,7 +2625,7 @@ impl State {
             // Always a full frame: the popup is small and repaints whole.
             damage: None,
         });
-        if !self.rows_frame_logged && !self.fuzzel.filtered_items.is_empty() {
+        if !self.rows_frame_logged && !self.ui_context[self.fuzzel].filtered_items.is_empty() {
             self.rows_frame_logged = true;
             log::info!("[timing] open -> first frame with rows: {:?}", self.opened_at.elapsed());
         }
@@ -2697,12 +2699,12 @@ impl AppState {
     fn trigger_select_and_close(&mut self) {
         let mut should_close = false;
         if let Some(st) = &mut self.state {
-            if !st.fuzzel.filtered_items.is_empty() {
-                if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+            if !st.ui_context[st.fuzzel].filtered_items.is_empty() {
+                if let Some(item) = st.ui_context[st.fuzzel].filtered_items.get(st.ui_context[st.fuzzel].selected) {
                     let answer = st.chooser.as_ref().map_or_else(|| item.clone(), |c| c.answer(item));
                     println!("{}", answer);
                     self.selected_item = Some(answer);
-                    if !run_system_item(&st.fuzzel, item) {
+                    if !run_system_item(&st.ui_context[st.fuzzel], item) {
                         match st.mode {
                             LauncherMode::Apps => {
                                 if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
@@ -2905,7 +2907,7 @@ impl PointerHandler for AppState {
                         st.cursor_y = cy;
                         if st.mode == LauncherMode::Json {
                             let mut changed = false;
-                            if let Some(jl) = &mut st.json_layout {
+                            if let Some(jh) = st.json_layout {
                                 // Routed dispatch (6bd shrink): one Event through the router.
                                 let mv = cce_ui::widget::Event::PointerMove {
                                     x: event.position.0 as f32,
@@ -2913,8 +2915,7 @@ impl PointerHandler for AppState {
                                     local_x: event.position.0 as f32,
                                     local_y: event.position.1 as f32,
                                 };
-                                let root = jl.id();
-                                st.ui_context.register_host(jl);
+                                let root = jh.id();
                                 if st.ui_context.propagate_event(&mv, root) {
                                     changed = true;
                                 }
@@ -2928,11 +2929,11 @@ impl PointerHandler for AppState {
                             // the region's `hovered` current for the wheel/keyboard scope
                             // either way. A drag moves the rows under the pointer, so the
                             // hover row is re-derived after it (update_scroll does that).
-                            let dragged = st.fuzzel.scroll_box.cursor_moved(cx, cy);
+                            let dragged = st.ui_context[st.fuzzel].scroll_box.cursor_moved(cx, cy);
                             if dragged {
-                                st.fuzzel.update_scroll();
+                                st.ui_context[st.fuzzel].update_scroll();
                             }
-                            if st.fuzzel.pointer_moved(cx, cy) || dragged {
+                            if st.ui_context[st.fuzzel].pointer_moved(cx, cy) || dragged {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
@@ -2944,13 +2945,13 @@ impl PointerHandler for AppState {
                     PointerEventKind::Enter { .. } => {
                         st.cursor_x = cx;
                         st.cursor_y = cy;
-                        if st.mode != LauncherMode::Json && st.fuzzel.hover_at(cx, cy) {
+                        if st.mode != LauncherMode::Json && st.ui_context[st.fuzzel].hover_at(cx, cy) {
                             st.upload_vertices();
                             self.redraw = true;
                         }
                     }
                     PointerEventKind::Leave { .. } => {
-                        if st.mode != LauncherMode::Json && st.fuzzel.clear_hover() {
+                        if st.mode != LauncherMode::Json && st.ui_context[st.fuzzel].clear_hover() {
                             st.upload_vertices();
                             self.redraw = true;
                         }
@@ -2961,7 +2962,7 @@ impl PointerHandler for AppState {
                             st.cursor_y = cy;
                             if st.mode == LauncherMode::Json {
                                 let mut changed = false;
-                                if let Some(jl) = &mut st.json_layout {
+                                if let Some(jh) = st.json_layout {
                                     let ev = cce_ui::widget::Event::MouseButton {
                                         button: cce_ui::widget::MouseButton::Left,
                                         state: cce_ui::widget::ElementState::Pressed,
@@ -2970,8 +2971,7 @@ impl PointerHandler for AppState {
                                         local_x: event.position.0 as f32,
                                         local_y: event.position.1 as f32,
                                     };
-                                    let root = jl.id();
-                                    st.ui_context.register_host(jl);
+                                    let root = jh.id();
                                     if st.ui_context.propagate_event(&ev, root) {
                                         changed = true;
                                     }
@@ -2980,28 +2980,28 @@ impl PointerHandler for AppState {
                                     st.upload_vertices();
                                     self.redraw = true;
                                 }
-                            } else if let Some(idx) = st.fuzzel.tab_at(cx, cy) {
+                            } else if let Some(idx) = st.ui_context[st.fuzzel].tab_at(cx, cy) {
                                 // Ahead of the row branch for the same reason
                                 // the scrollbar is: ANY press `on_event`
                                 // resolves is treated there as a selection and
                                 // — in Dmenu/switcher mode — committed. A tab
                                 // click must switch tabs, not choose a row.
-                                if st.fuzzel.switch_tab(idx) {
+                                if st.ui_context[st.fuzzel].switch_tab(idx) {
                                     st.update_desired_size();
                                     st.upload_vertices();
                                     self.redraw = true;
                                 }
-                            } else if st.fuzzel.scroll_box.press(cx, cy) {
+                            } else if st.ui_context[st.fuzzel].scroll_box.press(cx, cy) {
                                 // Thumb grab or track jump. This must be handled here rather
                                 // than inside `on_event`, because the row branch below treats
                                 // ANY handled press as a selection and — in Dmenu/switcher
                                 // mode — commits it and closes the popup. A scrollbar press
                                 // must scroll, not choose.
-                                st.fuzzel.update_scroll();
+                                st.ui_context[st.fuzzel].update_scroll();
                                 st.upload_vertices();
                                 self.redraw = true;
                             } else {
-                                let prev_selected = st.fuzzel.selected;
+                                let prev_selected = st.ui_context[st.fuzzel].selected;
                                 let changed = {
                                     let ev = cce_ui::widget::Event::MouseButton {
                                         button: cce_ui::widget::MouseButton::Left,
@@ -3012,7 +3012,6 @@ impl PointerHandler for AppState {
                                         local_y: event.position.1 as f32,
                                     };
                                     let root = st.fuzzel.id();
-                                    st.ui_context.register_host(&mut st.fuzzel);
                                     st.ui_context.propagate_event(&ev, root)
                                 };
                                 if changed {
@@ -3027,13 +3026,13 @@ impl PointerHandler for AppState {
                                     // row selects it (`pointer_moved`), is any row the
                                     // pointer reached by motion. A click on a row it only
                                     // rests on (the popup mapped under it) selects first.
-                                    let commit = !st.switcher_mode || st.fuzzel.selected == prev_selected;
+                                    let commit = !st.switcher_mode || st.ui_context[st.fuzzel].selected == prev_selected;
                                     if commit {
-                                        if let Some(item) = st.fuzzel.filtered_items.get(st.fuzzel.selected) {
+                                        if let Some(item) = st.ui_context[st.fuzzel].filtered_items.get(st.ui_context[st.fuzzel].selected) {
                                             let answer = st.chooser.as_ref().map_or_else(|| item.clone(), |c| c.answer(item));
                                             println!("{}", answer);
                                             self.selected_item = Some(answer);
-                                            if !run_system_item(&st.fuzzel, item) {
+                                            if !run_system_item(&st.ui_context[st.fuzzel], item) {
                                                 match st.mode {
                                                     LauncherMode::Apps => {
                                                         if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
@@ -3070,8 +3069,8 @@ impl PointerHandler for AppState {
                                 // rows than the first was clipped to the first
                                 // page's height until this resize.
                                 let mut page_switched = false;
-                                if let Some(jl) = &mut st.json_layout {
-                                    let page_before = jl.active_page;
+                                if let Some(jh) = st.json_layout {
+                                    let page_before = st.ui_context[jh].active_page;
                                     let ev = cce_ui::widget::Event::MouseButton {
                                         button: cce_ui::widget::MouseButton::Left,
                                         state: cce_ui::widget::ElementState::Released,
@@ -3080,13 +3079,12 @@ impl PointerHandler for AppState {
                                         local_x: event.position.0 as f32,
                                         local_y: event.position.1 as f32,
                                     };
-                                    let root = jl.id();
-                                    st.ui_context.register_host(jl);
+                                    let root = jh.id();
                                     if st.ui_context.propagate_event(&ev, root) {
                                         changed = true;
                                     }
-                                    page_switched = jl.active_page != page_before;
-                                    for w in &mut jl.widgets {
+                                    page_switched = st.ui_context[jh].active_page != page_before;
+                                    for w in &mut st.ui_context[jh].widgets {
                                         // take_click is an WidgetHost method; Phase 5 Buttons are
                                         // Adapted, so ask the box directly.
                                         if w.widget_type == "button" && w.widget.take_click() {
@@ -3108,7 +3106,7 @@ impl PointerHandler for AppState {
                                     let mut spinboxes = std::collections::HashMap::new();
                                     let mut colors = std::collections::HashMap::new();
                                     let mut sliders = std::collections::HashMap::new();
-                                    if let Some(jl) = &st.json_layout {
+                                    if let Some(jl) = st.json_layout.and_then(|h| st.ui_context.get(h)) {
                                         for w in &jl.widgets {
                                             if let Some(cb) = w.widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>() {
                                                 checkboxes.insert(w.id.clone(), cb.checked());
@@ -3133,7 +3131,7 @@ impl PointerHandler for AppState {
                                     self.selected_item = Some(out_str);
                                     should_close = true;
                                 }
-                            } else if st.fuzzel.scroll_box.release() {
+                            } else if st.ui_context[st.fuzzel].scroll_box.release() {
                                 // Ends a thumb drag. Returns true only if one was live, so a
                                 // plain click on a row is unaffected.
                                 st.upload_vertices();
@@ -3183,10 +3181,9 @@ impl PointerHandler for AppState {
                             // surface shown in this mode): route it the way the
                             // PointerMove above is routed.
                             let mut changed = false;
-                            if let Some(jl) = &mut st.json_layout {
+                            if let Some(jh) = st.json_layout {
                                 let ev = cce_ui::widget::Event::MouseWheel { delta, x: cx, y: cy, local_x: cx, local_y: cy };
-                                let root = jl.id();
-                                st.ui_context.register_host(jl);
+                                let root = jh.id();
                                 if st.ui_context.propagate_event(&ev, root) {
                                     changed = true;
                                 }
@@ -3195,8 +3192,8 @@ impl PointerHandler for AppState {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
-                        } else if st.fuzzel.scroll_box.wheel(&delta, st.cursor_x, st.cursor_y) {
-                            st.fuzzel.update_scroll();
+                        } else if st.ui_context[st.fuzzel].scroll_box.wheel(&delta, st.cursor_x, st.cursor_y) {
+                            st.ui_context[st.fuzzel].update_scroll();
                             st.upload_vertices();
                             self.redraw = true;
                         }
@@ -3471,14 +3468,14 @@ impl AppState {
             if let Some(st) = &mut self.state {
                 if st.mode != LauncherMode::Json {
                     let mut changed = false;
-                    if st.fuzzel.cycle_tab(false) {
+                    if st.ui_context[st.fuzzel].cycle_tab(false) {
                         st.update_desired_size();
                         changed = true;
-                    } else if !st.fuzzel.filtered_items.is_empty() {
-                        let len = st.fuzzel.filtered_items.len();
-                        st.fuzzel.selected = (st.fuzzel.selected + len - 1) % len;
-                        st.fuzzel.update_scroll();
-                        st.fuzzel.snap_to_selected();
+                    } else if !st.ui_context[st.fuzzel].filtered_items.is_empty() {
+                        let len = st.ui_context[st.fuzzel].filtered_items.len();
+                        st.ui_context[st.fuzzel].selected = (st.ui_context[st.fuzzel].selected + len - 1) % len;
+                        st.ui_context[st.fuzzel].update_scroll();
+                        st.ui_context[st.fuzzel].snap_to_selected();
                         changed = true;
                     }
                     if changed {
@@ -3527,10 +3524,9 @@ impl AppState {
                     shift: false,
                     alt: false,
                 };
-                if let Some(jl) = &mut st.json_layout {
+                if let Some(jh) = st.json_layout {
                     let kev = cce_ui::widget::Event::KeyInput(key_event.clone());
-                    let root = jl.id();
-                    st.ui_context.register_host(jl);
+                    let root = jh.id();
                     if st.ui_context.propagate_event(&kev, root) {
                         widget_handled = true;
                         st.upload_vertices();
@@ -3561,39 +3557,39 @@ impl AppState {
                         // cycling the highlight with wrap in the single-tab
                         // modes, which is what the Super-Tab window switcher
                         // (Dmenu, one tab) rides on.
-                        if st.fuzzel.cycle_tab(true) {
+                        if st.ui_context[st.fuzzel].cycle_tab(true) {
                             st.update_desired_size();
                             st.upload_vertices();
                             self.redraw = true;
-                        } else if !st.fuzzel.filtered_items.is_empty() {
-                            st.fuzzel.selected = (st.fuzzel.selected + 1) % st.fuzzel.filtered_items.len();
-                            st.fuzzel.update_scroll();
-                            st.fuzzel.snap_to_selected();
+                        } else if !st.ui_context[st.fuzzel].filtered_items.is_empty() {
+                            st.ui_context[st.fuzzel].selected = (st.ui_context[st.fuzzel].selected + 1) % st.ui_context[st.fuzzel].filtered_items.len();
+                            st.ui_context[st.fuzzel].update_scroll();
+                            st.ui_context[st.fuzzel].snap_to_selected();
                             st.upload_vertices();
                             self.redraw = true;
                         }
                     }
                     Key::Named(NamedKey::ArrowDown) => {
-                        if !st.fuzzel.filtered_items.is_empty() {
-                            st.fuzzel.selected = (st.fuzzel.selected + 1).min(st.fuzzel.filtered_items.len() - 1);
-                            st.fuzzel.update_scroll();
-                            st.fuzzel.snap_to_selected();
+                        if !st.ui_context[st.fuzzel].filtered_items.is_empty() {
+                            st.ui_context[st.fuzzel].selected = (st.ui_context[st.fuzzel].selected + 1).min(st.ui_context[st.fuzzel].filtered_items.len() - 1);
+                            st.ui_context[st.fuzzel].update_scroll();
+                            st.ui_context[st.fuzzel].snap_to_selected();
                             st.upload_vertices();
                             self.redraw = true;
                         }
                     }
                     Key::Named(NamedKey::ArrowUp) => {
-                        if st.fuzzel.selected > 0 {
-                            st.fuzzel.selected -= 1;
-                            st.fuzzel.update_scroll();
-                            st.fuzzel.snap_to_selected();
+                        if st.ui_context[st.fuzzel].selected > 0 {
+                            st.ui_context[st.fuzzel].selected -= 1;
+                            st.ui_context[st.fuzzel].update_scroll();
+                            st.ui_context[st.fuzzel].snap_to_selected();
                             st.upload_vertices();
                             self.redraw = true;
                         }
                     }
                     Key::Named(NamedKey::Backspace) => {
-                        st.fuzzel.query.pop();
-                        st.fuzzel.filter();
+                        st.ui_context[st.fuzzel].query.pop();
+                        st.ui_context[st.fuzzel].filter();
                         st.update_desired_size();
                         st.upload_vertices();
                         self.redraw = true;
@@ -3601,9 +3597,9 @@ impl AppState {
                     _ => {
                         if let Some(text) = &event.utf8 {
                             for ch in text.chars().filter(|c| !c.is_control()) {
-                                st.fuzzel.query.push(ch);
+                                st.ui_context[st.fuzzel].query.push(ch);
                             }
-                            st.fuzzel.filter();
+                            st.ui_context[st.fuzzel].filter();
                             st.update_desired_size();
                             st.upload_vertices();
                             self.redraw = true;
@@ -3898,20 +3894,20 @@ fn run_standalone() {
         }
         animating = false;
         if let Some(state) = &mut app.state {
-            if let Some(jl) = &mut state.json_layout {
-                if jl.tick(dt, &mut state.ui_context) {
+            if let Some(jh) = state.json_layout {
+                if state.ui_context.lend_h(jh, |jl, ctx| jl.tick(dt, ctx)).unwrap_or(false) {
                     app.redraw = true;
                     animating = true;
                 }
             }
             // Raise/sink upkeep for the list scrollbar (true while the
             // post-scroll hold runs or on the depth flip).
-            if state.fuzzel.scroll_box.tick(dt) {
+            if state.ui_context[state.fuzzel].scroll_box.tick(dt) {
                 app.redraw = true;
                 animating = true;
             }
             // A wheel glide moves the rows under a stationary pointer.
-            if state.fuzzel.refresh_hover() {
+            if state.ui_context[state.fuzzel].refresh_hover() {
                 state.upload_vertices();
                 app.redraw = true;
                 animating = true;
@@ -4541,20 +4537,20 @@ fn run_daemon(socket_path: &str) {
             }
             animating = false;
             if let Some(st) = &mut app.state {
-                if let Some(jl) = &mut st.json_layout {
-                    if jl.tick(dt, &mut st.ui_context) {
+                if let Some(jh) = st.json_layout {
+                    if st.ui_context.lend_h(jh, |jl, ctx| jl.tick(dt, ctx)).unwrap_or(false) {
                         app.redraw = true;
                         animating = true;
                     }
                 }
                 // Raise/sink upkeep for the list scrollbar (true while the
                 // post-scroll hold runs or on the depth flip).
-                if st.fuzzel.scroll_box.tick(dt) {
+                if st.ui_context[st.fuzzel].scroll_box.tick(dt) {
                     app.redraw = true;
                     animating = true;
                 }
                 // A wheel glide moves the rows under a stationary pointer.
-                if st.fuzzel.refresh_hover() {
+                if st.ui_context[st.fuzzel].refresh_hover() {
                     st.upload_vertices();
                     app.redraw = true;
                     animating = true;
