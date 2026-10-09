@@ -5092,13 +5092,13 @@ mod tests {
         // button lit up on the first stationary wiggle).
         let (x1, y1) = (layout.widgets[1].x, layout.widgets[1].y);
         let root = layout.id();
-        ctx.register_host(&mut layout);
+        let layout = ctx.insert(layout);
         let mv = |x: f32, y: f32| cce_ui::widget::Event::PointerMove { x, y, local_x: x, local_y: y };
         ctx.propagate_event(&mv(x1 + 10.0, y1 + 5.0), root);
         ctx.propagate_event(&mv(x1 + 12.0, y1 + 5.0), root);
-        assert!(!hovered(&layout, 0), "unconsumed move must not hover-broadcast");
-        assert!(hovered(&layout, 1));
-        assert!(!hovered(&layout, 2), "unconsumed move must not hover-broadcast");
+        assert!(!hovered(&ctx[layout], 0), "unconsumed move must not hover-broadcast");
+        assert!(hovered(&ctx[layout], 1));
+        assert!(!hovered(&ctx[layout], 2), "unconsumed move must not hover-broadcast");
     }
 
     #[test]
