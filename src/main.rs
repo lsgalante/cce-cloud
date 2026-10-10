@@ -1348,7 +1348,7 @@ impl cce_ui::widget::Paint for FuzzelWidget {
                         .with_depth(depth),
                     );
                 } else if self.tab_hovered == Some(i) {
-                    ctx.rounded_rect(seg, seg_r, (true, true, true, true), cce_ui::colors::PANEL_MENU_HOVER);
+                    ctx.rounded_rect(seg, seg_r, (true, true, true, true), cce_ui::color::PANEL_MENU_HOVER);
                 }
             }
         }

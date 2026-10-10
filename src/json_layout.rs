@@ -753,7 +753,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
         // rows butt against each other within it, which is why the run's
         // bounding box is a single continuous well rather than one per item.
         let radius = cce_ui::layout::button_corner_radius();
-        let face = cce_ui::colors::button_background_color();
+        let face = cce_ui::color::button_background_color();
         let mut seams: Vec<(Rect, f32)> = Vec::new();
         let mut i = 0;
         while i < self.widgets.len() {
