@@ -950,7 +950,7 @@ impl JsonLayoutWidget {
         // walk (same prims, fonts dropped — this consumer shapes with its own
         // control font, as the legacy getter path did).
         let mut scratch = cce_ui::scene::paint::PaintCtx::new();
-        cce_ui::scene::painter::append_widget_text(ctx, w.widget.as_dyn(), &mut scratch);
+        cce_ui::widget::painter::append_widget_text(ctx, w.widget.as_dyn(), &mut scratch);
         scratch
             .finish()
             .items

@@ -134,7 +134,7 @@ fn walk_text_labels(
     w: &dyn WidgetHost,
 ) -> Vec<(TextLabel, Option<[f32; 4]>)> {
     let mut pc = cce_ui::scene::paint::PaintCtx::new();
-    cce_ui::scene::painter::append_widget_text(ui, w, &mut pc);
+    cce_ui::widget::painter::append_widget_text(ui, w, &mut pc);
     pc.finish()
         .items
         .into_iter()
