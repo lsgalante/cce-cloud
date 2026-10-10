@@ -1,3 +1,4 @@
+use cce_ui::process::de_bin;
 use cce_ui::widget::Handle;
 use cce_ui::widget::ScrollRegion;
 
@@ -657,24 +658,6 @@ fn sort_apps_by_history(apps: &mut Vec<AppInfo>) {
 
 fn spawn_command(cmd: &str) {
     spawn_detached("sh", &["-c", cmd]);
-}
-
-/// Resolve a cce binary installed beside this one.
-///
-/// The launcher runs as a systemd user service, whose PATH is
-/// `/usr/local/bin:/usr/bin` — `~/.local/bin`, where every cce binary lives,
-/// is not on it, so spawning one by bare name fails with ENOENT under systemd
-/// while working fine from a shell.
-fn de_bin(name: &str) -> std::path::PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let beside = dir.join(name);
-            if beside.exists() {
-                return beside;
-            }
-        }
-    }
-    std::path::PathBuf::from(name)
 }
 
 /// Open the launched window at the grid square this launcher was invoked at,
