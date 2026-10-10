@@ -229,152 +229,39 @@ fn scan_path() -> Vec<String> {
     executables.into_iter().collect()
 }
 
+/// `Exec=` without its field codes: cce-core's `strip_field_codes`, which also
+/// keeps a literal `%%` as `%` (this copy used to turn `%%f` into nothing).
 fn clean_exec_command(exec: &str) -> String {
-    let mut words = Vec::new();
-    for word in exec.split_whitespace() {
-        match word {
-            "%f" | "%F" | "%u" | "%U" | "%d" | "%D" | "%n" | "%N" | "%i" | "%c" | "%k" | "%v" => {
-                // Skip these field codes
-            }
-            _ => {
-                let cleaned = word
-                    .replace("%f", "")
-                    .replace("%F", "")
-                    .replace("%u", "")
-                    .replace("%U", "")
-                    .replace("%d", "")
-                    .replace("%D", "")
-                    .replace("%n", "")
-                    .replace("%N", "")
-                    .replace("%i", "")
-                    .replace("%c", "")
-                    .replace("%k", "")
-                    .replace("%v", "")
-                    .replace("%%", "%");
-                if !cleaned.is_empty() {
-                    words.push(cleaned);
-                }
-            }
-        }
-    }
-    words.join(" ")
+    cce_ui::desktop_entry::strip_field_codes(exec)
 }
 
 fn parse_desktop_file(path: &std::path::Path) -> Option<AppInfo> {
-    let file = std::fs::File::open(path).ok()?;
-    let reader = std::io::BufReader::new(file);
-    
-    let mut in_desktop_entry = false;
-    let mut name = None;
-    let mut exec = None;
-    let mut is_application = true;
-    let mut no_display = false;
-    let mut terminal = false;
-    let mut icon = None;
-
-    for line in reader.lines() {
-        let line = line.ok()?;
-        let trimmed = line.trim();
-        if trimmed.starts_with('#') || trimmed.is_empty() {
-            continue;
-        }
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if trimmed == "[Desktop Entry]" {
-                in_desktop_entry = true;
-            } else {
-                in_desktop_entry = false;
-            }
-            continue;
-        }
-        if in_desktop_entry {
-            if let Some(pos) = trimmed.find('=') {
-                let key = trimmed[..pos].trim();
-                let value = trimmed[pos + 1..].trim();
-                match key {
-                    "Name" => {
-                        if name.is_none() {
-                            name = Some(value.to_string());
-                        }
-                    }
-                    "Exec" => {
-                        if exec.is_none() {
-                            exec = Some(clean_exec_command(value));
-                        }
-                    }
-                    "Icon" => {
-                        if icon.is_none() && !value.is_empty() {
-                            icon = Some(value.to_string());
-                        }
-                    }
-                    "Type" => {
-                        if value != "Application" {
-                            is_application = false;
-                        }
-                    }
-                    "NoDisplay" => {
-                        if value == "true" {
-                            no_display = true;
-                        }
-                    }
-                    "Terminal" => {
-                        if value == "true" {
-                            terminal = true;
-                        }
-                    }
-                    // Hidden means "treat as deleted" — same outcome as
-                    // NoDisplay for a launcher: the entry never shows.
-                    "Hidden" => {
-                        if value == "true" {
-                            no_display = true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
+    // Only the [Desktop Entry] group: an action's Name= or Exec= further
+    // down is not the app's.
+    let entry = cce_ui::desktop_entry::DesktopEntry::read(path)?;
+    // Hidden means "treat as deleted" — same outcome as NoDisplay for a
+    // launcher: the entry never shows.
+    if !entry.is_application() || entry.no_display() || entry.hidden() {
+        return None;
     }
-
-    if is_application && !no_display {
-        if let (Some(n), Some(e)) = (name, exec) {
-            let icon = path.file_stem().and_then(|s| s.to_str()).and_then(icon_override).or(icon);
-            return Some(AppInfo { name: n, exec: e, terminal, icon });
-        }
-    }
-    None
+    let name = entry.get("Name")?.to_string();
+    let exec = clean_exec_command(entry.get("Exec")?);
+    let terminal = entry.flag("Terminal");
+    let icon = entry.get("Icon").filter(|i| !i.is_empty()).map(str::to_string);
+    let icon = path.file_stem().and_then(|s| s.to_str()).and_then(icon_override).or(icon);
+    Some(AppInfo { name, exec, terminal, icon })
 }
 
-/// The `applications/` dirs `.desktop` files are read from, in XDG precedence:
-/// $XDG_DATA_HOME first, then each $XDG_DATA_DIRS entry in order (defaults per
-/// the base-directory spec). Honoring XDG_DATA_DIRS is what makes Flatpak/Snap
-/// exports visible.
+/// The `applications/` dirs `.desktop` files are read from, in XDG precedence
+/// (cce-core's `desktop_entry`). Honoring XDG_DATA_DIRS is what makes
+/// Flatpak/Snap exports visible.
 fn application_dirs() -> Vec<std::path::PathBuf> {
-    let mut dirs = Vec::new();
-    if let Some(data_home) = data_home() {
-        dirs.push(data_home.join("applications"));
-    }
-    let data_dirs = std::env::var("XDG_DATA_DIRS")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "/usr/local/share:/usr/share".to_string());
-    for dir in std::env::split_paths(&data_dirs) {
-        if !dir.as_os_str().is_empty() {
-            dirs.push(dir.join("applications"));
-        }
-    }
-    dirs
+    cce_ui::desktop_entry::applications_dirs()
 }
 
 /// `$XDG_DATA_HOME`, defaulting per the base-directory spec.
 fn data_home() -> Option<std::path::PathBuf> {
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var("HOME")
-                .ok()
-                .map(|h| std::path::PathBuf::from(h).join(".local/share"))
-        })
+    cce_ui::desktop_entry::data_dirs().into_iter().next()
 }
 
 /// cce's own icon for the desktop entry `id` (its file stem), when cce-icons
