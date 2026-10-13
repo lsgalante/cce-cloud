@@ -1,6 +1,7 @@
 use cce_ui::process::de_bin;
 use cce_ui::widget::Handle;
 use cce_ui::widget::ScrollRegion;
+use cce_ui::widget::{LineEdit, LineLook, LineMarks};
 
 use std::sync::{Arc, Mutex};
 use std::io::{self, BufRead, IsTerminal};
@@ -111,12 +112,28 @@ fn tessellate(
     (verts, batches, images, features)
 }
 
+/// A label's line height over its font size in [`make_text_buffer`]: the
+/// glyphs sit centred in a line this tall, so a label's ink is centred
+/// `size * LABEL_LINE_H / 2` below its `y` — which is where the query line's
+/// caret and selection are centred (see `FuzzelWidget::query_area`).
+const LABEL_LINE_H: f32 = 1.4;
+
+/// Every label this app draws, shaped in the control font. The shaping mode
+/// is the toolkit's (`cce_ui::text::shaping_for`: ASCII in a monospaced face
+/// shapes `Basic`, everything else `Advanced`), so text drawn here is shaped
+/// exactly as `LineMarks` measures it and the query line's caret stands on
+/// its glyphs. It was always `Advanced` until 2026-10-12; the two agree in
+/// Berkeley Mono, the default face, glyph for glyph, and differ only in a
+/// monospaced face with ligatures, where the toolkit's choice is the one
+/// every other cce client draws.
 fn make_text_buffer(font_system: &mut FontSystem, text: &str, size: f32) -> Buffer {
-    let metrics = Metrics::new(size, size * 1.4);
+    let metrics = Metrics::new(size, size * LABEL_LINE_H);
     let mut buffer = Buffer::new(font_system, metrics);
     let font_family = cce_ui::layout::control_label_font_parsed().0;
-    let attrs = Attrs::new().family(cce_ui::cosmic_text::Family::Name(&font_family));
-    buffer.set_text(font_system, text, attrs, cce_ui::cosmic_text::Shaping::Advanced);
+    let family = cce_ui::cosmic_text::Family::Name(&font_family);
+    let shaping = cce_ui::text::shaping_for(font_system, text, &family);
+    let attrs = Attrs::new().family(family);
+    buffer.set_text(font_system, text, attrs, shaping);
     buffer.shape_until_scroll(font_system, true);
     buffer
 }
@@ -795,7 +812,19 @@ pub struct FuzzelWidget {
     w: f32,
     h: f32,
     prompt: String,
-    query: String,
+    /// The search line's text, caret and selection, edited by
+    /// `AppState::handle_key` (see "The query line" in CLAUDE.md). Drawn
+    /// after the prompt, as one label with it.
+    query: LineEdit,
+    /// The prompt and the query as drawn, measured by
+    /// [`Self::measure_query`] before every paint: the caret's and the
+    /// selection's x, from the label's left. Measuring needs the app's font
+    /// system, which the paint walk does not carry.
+    query_marks: LineMarks,
+    /// How far the query line is scrolled left to keep the caret in the
+    /// well (`keep_caret`). 0 unless the line is longer than the widest
+    /// window the popup may grow to.
+    query_scroll: f32,
     all_items: Vec<String>,
     filtered_items: Vec<String>,
     selected: usize,
@@ -846,7 +875,8 @@ pub struct FuzzelWidget {
 pub struct TabPage {
     title: String,
     items: Vec<String>,
-    query: String,
+    /// The page's own query — caret, selection and undo history with it.
+    query: LineEdit,
 }
 
 /// Icon edge length inside an [`ICON_ITEM_H`] row. The gap between it and the
@@ -912,6 +942,8 @@ const ICON_ITEM_H: f32 = 36.0;
 const CHIP_STANDOFF: f32 = 2.0;
 /// Tab-title size — a step under the row labels, as a control label is.
 const TAB_FONT_PX: f32 = 12.0;
+/// The query line's size (the prompt, the query and the placeholder).
+const QUERY_PX: f32 = 14.0;
 
 impl FuzzelWidget {
     pub fn new(prompt: String) -> cce_ui::widget::Adapted<FuzzelWidget> {
@@ -921,7 +953,9 @@ impl FuzzelWidget {
             w: 0.0,
             h: 0.0,
             prompt,
-            query: String::new(),
+            query: LineEdit::default(),
+            query_marks: LineMarks::default(),
+            query_scroll: 0.0,
             all_items: Vec::new(),
             filtered_items: Vec::new(),
             selected: 0,
@@ -954,7 +988,7 @@ impl FuzzelWidget {
     pub fn set_tabs(&mut self, tabs: Vec<(String, Vec<String>)>) {
         self.tabs = tabs
             .into_iter()
-            .map(|(title, items)| TabPage { title, items, query: String::new() })
+            .map(|(title, items)| TabPage { title, items, query: LineEdit::default() })
             .collect();
         self.active_tab = 0;
         if let Some(first) = self.tabs.first_mut() {
@@ -999,6 +1033,7 @@ impl FuzzelWidget {
         self.active_tab = idx;
         self.all_items = std::mem::take(&mut self.tabs[idx].items);
         self.query = std::mem::take(&mut self.tabs[idx].query);
+        self.query_scroll = 0.0;
         self.selected = 0;
         self.scroll_box.scroll_y = 0.0;
         self.recompute_icon_gutter();
@@ -1085,6 +1120,91 @@ impl FuzzelWidget {
         self.x + cce_ui::layout::root_plate_inset() + CHIP_STANDOFF + cce_ui::layout::CONTROL_TEXT_INSET
     }
 
+    /// The search well: a textbox-height recess under the tab strip, inset
+    /// from the popup edge as the list is.
+    fn search_well(&self) -> cce_ui::scene::layout::Rect {
+        let pad = cce_ui::layout::root_plate_inset();
+        cce_ui::scene::layout::Rect {
+            x: self.x + pad,
+            y: self.search_y(),
+            width: self.w - pad * 2.0,
+            height: cce_ui::layout::textbox_height(),
+        }
+    }
+
+    /// Depth of the search well's rim.
+    fn search_well_depth(&self) -> f32 {
+        cce_ui::layout::bevel_width().min(cce_ui::layout::textbox_height() * 0.2)
+    }
+
+    /// Y of the query label's top: its line centred in the well by this
+    /// app's label metrics.
+    fn query_label_y(&self) -> f32 {
+        self.search_y() + (cce_ui::layout::textbox_height() - 17.0) / 2.0
+    }
+
+    /// Where the query line's selection and caret are painted: the well
+    /// inside its rim, as tall as fits centred on the label's ink. Centred on
+    /// the ink, not the well, because `paint_line` centres its marks in the
+    /// area it is given, where the toolkit's own text — a line exactly its
+    /// font size tall — sits centred too; this app's labels sit in a line
+    /// `LABEL_LINE_H` times as tall, their ink half that line below their
+    /// top, which is 1.3px under the well's middle. Centred on the well, the
+    /// caret stood that much high.
+    fn query_area(&self) -> cce_ui::scene::layout::Rect {
+        let well = self.search_well();
+        let depth = self.search_well_depth();
+        let mid = self.query_label_y() + QUERY_PX * LABEL_LINE_H / 2.0;
+        let half = (mid - well.y).min(well.y + well.height - mid).max(0.0);
+        cce_ui::scene::layout::Rect {
+            x: well.x + depth,
+            y: mid - half,
+            width: (well.width - 2.0 * depth).max(0.0),
+            height: 2.0 * half,
+        }
+    }
+
+    /// Where the query line's text is cut: the well inside its rim. Nothing
+    /// is, unless a query outgrows the widest popup and scrolls.
+    fn query_clip(&self) -> cce_ui::scene::layout::Rect {
+        let well = self.search_well();
+        let area = self.query_area();
+        cce_ui::scene::layout::Rect { x: area.x, y: well.y, width: area.width, height: well.height }
+    }
+
+    /// Measure the query line as it is drawn, and keep its caret inside the
+    /// well. Before every paint (`State::upload_vertices`): measuring needs
+    /// the app's font system, which the paint walk does not carry. The
+    /// prompt and the query are ONE label ([`Self::query_label`]), so they
+    /// are measured as one — an edit of the whole line, the caret and the
+    /// selection carried past the prompt — in the face and size the label is
+    /// drawn in.
+    pub fn measure_query(&mut self, fs: &mut FontSystem) {
+        let p = self.prompt.len();
+        let mut line = LineEdit::with_text(format!("{}{}", self.prompt, self.query.text));
+        line.cursor = p + self.query.cursor;
+        line.selection = self.query.selection.map(|(a, b)| (p + a, p + b));
+        let family = cce_ui::layout::control_label_font_parsed().0;
+        self.query_marks = LineMarks::of(fs, &line, QUERY_PX, Some(&family));
+        let area = self.query_area();
+        let avail = area.x + area.width - cce_ui::widget::line_edit::CARET_W - self.text_x();
+        self.query_scroll = self.query_marks.keep_caret(self.query_scroll, avail);
+    }
+
+    /// The prompt and the query — or the placeholder — as one label in the
+    /// well, scrolled with the caret. The prompt wears the query's colour:
+    /// dim over the placeholder, bright over a query.
+    fn query_label(&self) -> TextLabel {
+        let empty = self.query.text.is_empty();
+        TextLabel {
+            text: format!("{}{}", self.prompt, if empty { "Type to search..." } else { &self.query.text }),
+            x: self.text_x() - self.query_scroll,
+            y: self.query_label_y(),
+            font_size: QUERY_PX,
+            color: if empty { [0x66, 0x66, 0x77] } else { [0xcc, 0xff, 0xcc] },
+        }
+    }
+
     /// Vertical chrome around the list: the inset above and below, the search
     /// well and the gap under it, and the tab strip when there is one. What
     /// the popup's height is over its rows.
@@ -1167,7 +1287,7 @@ impl FuzzelWidget {
     }
 
     pub fn filter(&mut self) {
-        self.filtered_items = filter_and_sort_items(&self.all_items, &self.query);
+        self.filtered_items = filter_and_sort_items(&self.all_items, &self.query.text);
         if self.selected >= self.filtered_items.len() {
             self.selected = self.filtered_items.len().saturating_sub(1);
         }
@@ -1346,12 +1466,20 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         // highlight accent (the toolkit's focused-well treatment; the query
         // line always holds keyboard focus here). Replaces the flat fill +
         // 1px border quads.
-        let search_h = cce_ui::layout::textbox_height();
-        let well = Rect { x: self.x + pad, y: self.search_y(), width: self.w - pad * 2.0, height: search_h };
+        let well = self.search_well();
         ctx.quad(well, [0.10, 0.10, 0.14, 1.0]);
-        let depth = cce_ui::layout::bevel_width().min(search_h * 0.2);
+        let depth = self.search_well_depth();
         let hc = cce_ui::color::highlight_primary_color();
         ctx.recess_tinted(well, (0.0, 0.0, 0.0, 0.0), depth, [hc[0], hc[1], hc[2]]);
+
+        // The query line's selection and caret, measured by `measure_query`.
+        // The line always has the keyboard, so the caret always shows. Its
+        // text is the label drawn last (`query_label`, through this app's own
+        // text pass), so `paint_line` is handed the marks with nothing shown
+        // and no placeholder: it paints the selection and the caret, no text.
+        let marks = LineMarks { shown: String::new(), ..self.query_marks.clone() };
+        let look = LineLook::new(QUERY_PX, Some(cce_ui::layout::control_label_font_parsed().0));
+        cce_ui::widget::line_edit::paint_line(ctx, self.query_area(), self.text_x() - self.query_scroll, &marks, &look, "", true);
 
         // The list's scrollbar idles UNDER its translucent bg fill, every
         // frame: down the list's centre line (the toolkit centres a
@@ -1434,10 +1562,16 @@ impl cce_ui::widget::Paint for FuzzelWidget {
         // sink are a fade rather than a flip.
         self.scroll_box.push_scrollbar_fore(ctx);
 
-        // Prompt/query line and the empty-state notice — outside the list clip.
+        // Tab titles and the empty-state notice — outside the list clip.
         for l in self.own_labels() {
             ctx.text(l.text, l.x, l.y, l.font_size, l.color);
         }
+        // The query line, cut at the well: it only reaches the rim once a
+        // query outgrows the widest popup and scrolls with the caret.
+        let q = self.query_label();
+        ctx.clip(self.query_clip(), |ctx| {
+            ctx.text(q.text, q.x, q.y, q.font_size, q.color);
+        });
     }
 }
 
@@ -2235,12 +2369,8 @@ impl State {
         // Calculate max text width
         let mut max_text_w: f32 = 0.0;
         
-        let query_text = if self.ui_context[self.fuzzel].query.is_empty() {
-            format!("{}{}", self.ui_context[self.fuzzel].prompt, "Type to search...")
-        } else {
-            format!("{}{}", self.ui_context[self.fuzzel].prompt, self.ui_context[self.fuzzel].query)
-        };
-        let buf = make_text_buffer(&mut self.font_system, &query_text, 14.0);
+        let query_text = self.ui_context[self.fuzzel].query_label().text;
+        let buf = make_text_buffer(&mut self.font_system, &query_text, QUERY_PX);
         let tw = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
         if tw > max_text_w {
             max_text_w = tw;
@@ -2375,6 +2505,9 @@ impl State {
     }
 
     fn upload_vertices(&mut self) {
+        if self.mode != LauncherMode::Json {
+            self.ui_context[self.fuzzel].measure_query(&mut self.font_system);
+        }
         let dl = self.collect_display_list();
         let (verts, batches, images, features) =
             tessellate(&dl, self.width, self.height, self.scale as f32);
@@ -2522,6 +2655,10 @@ struct AppState {
     exit: bool,
     redraw: bool,
     ctrl_pressed: bool,
+    /// Shift and Alt, for the query line's chords (Shift+arrows select; an
+    /// Alt chord types nothing).
+    shift_pressed: bool,
+    alt_pressed: bool,
     /// The switcher's hold modifier — Super or Alt, whichever chord opened
     /// it — is still down. Starts true in switcher mode (the chord that
     /// opened it is held); its release commits the highlighted row.
@@ -3131,6 +3268,8 @@ impl KeyboardHandler for AppState {
     ) {
         let prev_held = self.switch_held;
         self.ctrl_pressed = modifiers.ctrl;
+        self.shift_pressed = modifiers.shift;
+        self.alt_pressed = modifiers.alt;
         // Super+Tab or Alt+Tab: either can be bound to the switcher, and it
         // cannot tell which opened it, so it commits once neither is held.
         self.switch_held = modifiers.logo || modifiers.alt;
@@ -3346,32 +3485,31 @@ impl AppState {
         }
 
         let (select_next, select_prev) = *nav_keys();
-        let logical_key = match event.keysym {
-            xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
-            xkeysym::Keysym::Return => Key::Named(NamedKey::Enter),
-            xkeysym::Keysym::BackSpace => Key::Named(NamedKey::Backspace),
-            xkeysym::Keysym::Down => Key::Named(NamedKey::ArrowDown),
-            xkeysym::Keysym::Up => Key::Named(NamedKey::ArrowUp),
-            xkeysym::Keysym::Left => Key::Named(NamedKey::ArrowLeft),
-            xkeysym::Keysym::Right => Key::Named(NamedKey::ArrowRight),
-            xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
-            xkeysym::Keysym::Delete => Key::Named(NamedKey::Delete),
-            xkeysym::Keysym::space => Key::Named(NamedKey::Space),
-            sym if nav_matches(select_next, self.ctrl_pressed, sym) => Key::Named(NamedKey::ArrowDown),
-            sym if nav_matches(select_prev, self.ctrl_pressed, sym) => Key::Named(NamedKey::ArrowUp),
-            _ => {
-                if let Some(ref text) = event.utf8 {
-                    Key::Character(text.clone())
-                } else {
-                    return;
-                }
-            }
-        };
 
         let mut should_close = false;
         if let Some(st) = &mut self.state {
-            let mut handled = true;
             if st.mode == LauncherMode::Json {
+                // The JSON panel's widgets take the keys they always have:
+                // the named keys below and typed text, as one would without
+                // Shift or Alt.
+                let logical_key = match event.keysym {
+                    xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
+                    xkeysym::Keysym::Return => Key::Named(NamedKey::Enter),
+                    xkeysym::Keysym::BackSpace => Key::Named(NamedKey::Backspace),
+                    xkeysym::Keysym::Down => Key::Named(NamedKey::ArrowDown),
+                    xkeysym::Keysym::Up => Key::Named(NamedKey::ArrowUp),
+                    xkeysym::Keysym::Left => Key::Named(NamedKey::ArrowLeft),
+                    xkeysym::Keysym::Right => Key::Named(NamedKey::ArrowRight),
+                    xkeysym::Keysym::Tab => Key::Named(NamedKey::Tab),
+                    xkeysym::Keysym::Delete => Key::Named(NamedKey::Delete),
+                    xkeysym::Keysym::space => Key::Named(NamedKey::Space),
+                    sym if nav_matches(select_next, self.ctrl_pressed, sym) => Key::Named(NamedKey::ArrowDown),
+                    sym if nav_matches(select_prev, self.ctrl_pressed, sym) => Key::Named(NamedKey::ArrowUp),
+                    _ => match event.utf8 {
+                        Some(ref text) => Key::Character(text.clone()),
+                        None => return,
+                    },
+                };
                 let mut widget_handled = false;
                 let key_event = cce_ui::widget::KeyEvent {
                     state,
@@ -3391,18 +3529,28 @@ impl AppState {
                         self.redraw = true;
                     }
                 }
-                if !widget_handled {
-                    match &logical_key {
-                        Key::Named(NamedKey::Escape) => {
-                            should_close = true;
-                        }
-                        _ => {
-                            handled = false;
-                        }
-                    }
+                if !widget_handled && logical_key == Key::Named(NamedKey::Escape) {
+                    should_close = true;
+                    self.redraw = true;
                 }
             } else {
-                match &logical_key {
+                // In the Super-Tab / Alt+Tab switcher Alt is the key holding
+                // the popup open, not a chord: typing under it filters, as it
+                // always has. Anywhere else an Alt chord types nothing.
+                let alt = self.alt_pressed && !self.switcher_mode;
+                let Some(key) = list_key_event(event.keysym, event.utf8.as_deref(), self.ctrl_pressed, self.shift_pressed, alt) else {
+                    return;
+                };
+                // The list's own keys come first, as they always have: the
+                // configured nav chords (ctrl+n / ctrl+p) are list moves, not
+                // text, unless the key is already a named one.
+                let list_key = match &key.logical_key {
+                    Key::Named(_) => key.logical_key.clone(),
+                    _ if nav_matches(select_next, self.ctrl_pressed, event.keysym) => Key::Named(NamedKey::ArrowDown),
+                    _ if nav_matches(select_prev, self.ctrl_pressed, event.keysym) => Key::Named(NamedKey::ArrowUp),
+                    other => other.clone(),
+                };
+                match list_key {
                     Key::Named(NamedKey::Escape) => {
                         should_close = true;
                     }
@@ -3445,29 +3593,32 @@ impl AppState {
                             self.redraw = true;
                         }
                     }
-                    Key::Named(NamedKey::Backspace) => {
-                        st.ui_context[st.fuzzel].query.pop();
-                        st.ui_context[st.fuzzel].filter();
-                        st.update_desired_size();
-                        st.upload_vertices();
-                        self.redraw = true;
-                    }
+                    // Everything else edits the query (see "The query line"
+                    // in CLAUDE.md). Undo and redo are the DE's chords, which
+                    // the cce-ui runner would route to the app; this app runs
+                    // its own loop, so it matches them itself.
                     _ => {
-                        if let Some(text) = &event.utf8 {
-                            for ch in text.chars().filter(|c| !c.is_control()) {
-                                st.ui_context[st.fuzzel].query.push(ch);
-                            }
+                        let (undo, redo) = edit_chords();
+                        let q = &mut st.ui_context[st.fuzzel].query;
+                        let before = (q.text.clone(), q.cursor, q.selection);
+                        if cce_ui::widget::match_key_shortcut(&key, undo) {
+                            q.undo();
+                        } else if cce_ui::widget::match_key_shortcut(&key, redo) {
+                            q.redo();
+                        } else {
+                            q.handle_key(&key);
+                        }
+                        let edited = q.text != before.0;
+                        let moved = (q.cursor, q.selection) != (before.1, before.2);
+                        if edited {
                             st.ui_context[st.fuzzel].filter();
                             st.update_desired_size();
+                        }
+                        if edited || moved {
                             st.upload_vertices();
-                            self.redraw = true;
-                        } else {
-                            handled = false;
                         }
                     }
                 }
-            }
-            if handled {
                 self.redraw = true;
             }
         }
@@ -3634,6 +3785,8 @@ fn run_standalone() {
         exit: false,
         redraw: false,
         ctrl_pressed: false,
+        shift_pressed: false,
+        alt_pressed: false,
         switch_held: switcher_mode,
         switcher_mode,
         fade_until: None,
@@ -3963,6 +4116,8 @@ fn run_daemon(socket_path: &str) {
         exit: false,
         redraw: false,
         ctrl_pressed: false,
+        shift_pressed: false,
+        alt_pressed: false,
         switch_held: false,
         switcher_mode: false,
         fade_until: None,
@@ -4505,6 +4660,67 @@ fn nav_keys() -> &'static (Option<(bool, char)>, Option<(bool, char)>) {
             chord_ctrl_char(&cce_ui::input::app_chord("select_next", "ctrl+n")),
             chord_ctrl_char(&cce_ui::input::app_chord("select_prev", "ctrl+p")),
         )
+    })
+}
+
+/// The query line's undo and redo chords: the DE's `undo` / `redo` from
+/// input.kdl (Ctrl+Z / Ctrl+Shift+Z by default), read the way the cce-ui
+/// runner reads them for the apps it hosts. Ctrl+Y redoes too, inside
+/// `LineEdit` itself. Resolved once per process.
+fn edit_chords() -> (&'static str, &'static str) {
+    static CHORDS: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+    let (undo, redo) = CHORDS.get_or_init(|| {
+        (cce_ui::input::app_chord("undo", "ctrl+z"), cce_ui::input::app_chord("redo", "ctrl+shift+z"))
+    });
+    (undo, redo)
+}
+
+/// A key as the toolkit spells it, for the launcher list and its query's
+/// `LineEdit`; `None` for one that means nothing here (a bare modifier, a
+/// function key). Home, End and Delete are named keys, so the field can move
+/// and delete with them.
+///
+/// Under Ctrl, `utf8` is a control character — Ctrl+V arrives as U+0016 — so
+/// a chord's key is read off the keysym instead, lowercased: the toolkit
+/// spells Ctrl+Shift+Z as `z` with `shift` set, as `match_key_shortcut`
+/// expects. The text rides along as sent either way.
+fn list_key_event(
+    keysym: xkeysym::Keysym,
+    utf8: Option<&str>,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+) -> Option<cce_ui::widget::KeyEvent> {
+    use cce_ui::widget::{Key, NamedKey};
+    use xkeysym::Keysym as K;
+    let named = match keysym {
+        K::Escape => Some(NamedKey::Escape),
+        K::Return => Some(NamedKey::Enter),
+        K::BackSpace => Some(NamedKey::Backspace),
+        K::Delete => Some(NamedKey::Delete),
+        K::Down => Some(NamedKey::ArrowDown),
+        K::Up => Some(NamedKey::ArrowUp),
+        K::Left => Some(NamedKey::ArrowLeft),
+        K::Right => Some(NamedKey::ArrowRight),
+        K::Home => Some(NamedKey::Home),
+        K::End => Some(NamedKey::End),
+        K::Tab => Some(NamedKey::Tab),
+        K::space => Some(NamedKey::Space),
+        _ => None,
+    };
+    let logical_key = match named {
+        Some(n) => Key::Named(n),
+        None if ctrl => Key::Character(keysym.key_char()?.to_lowercase().collect()),
+        None => Key::Character(utf8.filter(|t| !t.is_empty())?.to_string()),
+    };
+    Some(cce_ui::widget::KeyEvent {
+        state: cce_ui::widget::ElementState::Pressed,
+        logical_key,
+        text: utf8.map(str::to_string),
+        repeat: false,
+        ctrl,
+        shift,
+        alt,
     })
 }
 
@@ -5154,20 +5370,20 @@ mod tests {
             ("Apps".to_string(), vec!["Firefox".to_string(), "Files".to_string()]),
             ("System".to_string(), vec!["Suspend".to_string(), "Reboot".to_string()]),
         ]);
-        f.query.push_str("fi");
+        f.query = LineEdit::with_text("fi");
         f.filter();
         assert_eq!(f.filtered_items, vec!["Firefox".to_string(), "Files".to_string()]);
 
         assert!(f.cycle_tab(true));
         assert_eq!(f.active_tab, 1);
         // The System tab opens on its own (empty) query, not the Apps one.
-        assert_eq!(f.query, "");
+        assert_eq!(f.query.text, "");
         assert_eq!(f.filtered_items, vec!["Suspend".to_string(), "Reboot".to_string()]);
 
         // ...and coming back lands on the query that was left behind.
         assert!(f.cycle_tab(true), "two tabs wrap");
         assert_eq!(f.active_tab, 0);
-        assert_eq!(f.query, "fi");
+        assert_eq!(f.query.text, "fi");
         assert_eq!(f.filtered_items, vec!["Firefox".to_string(), "Files".to_string()]);
     }
 
@@ -5368,25 +5584,8 @@ impl FuzzelWidget {
             });
         }
 
-        let query_text = if self.query.is_empty() {
-            format!("{}{}", self.prompt, "Type to search...")
-        } else {
-            format!("{}{}", self.prompt, self.query)
-        };
-        let query_color = if self.query.is_empty() {
-            [0x66, 0x66, 0x77]
-        } else {
-            [0xcc, 0xff, 0xcc]
-        };
-
-        labels.push(TextLabel {
-            text: query_text,
-            x: self.text_x(),
-            // The 14px line centred in the well.
-            y: self.search_y() + (cce_ui::layout::textbox_height() - 17.0) / 2.0,
-            font_size: 14.0,
-            color: query_color,
-        });
+        // The query line is not among them: it is cut at the search well
+        // (see `query_label`).
 
         if self.filtered_items.is_empty() {
             labels.push(TextLabel {
@@ -5497,5 +5696,125 @@ mod repeat_tests {
         assert!(!key_repeats(K::Tab, Some("\t")));
         // A modifier or dead key carries no text: nothing to repeat.
         assert!(!key_repeats(K::Shift_L, None));
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    use cce_ui::widget::{match_key_shortcut, Key, NamedKey};
+    use xkeysym::Keysym as K;
+
+    fn press(q: &mut LineEdit, sym: K, utf8: Option<&str>, ctrl: bool, shift: bool) {
+        q.handle_key(&list_key_event(sym, utf8, ctrl, shift, false).expect("a key"));
+    }
+
+    /// Typed text is what the key sends; a Ctrl chord's key is its keysym's,
+    /// lowercased, since what Ctrl sends is a control character; Home, End
+    /// and Delete are named; a bare modifier or a function key is nothing.
+    #[test]
+    fn keys_are_spelled_as_the_toolkit_spells_them() {
+        let ev = list_key_event(K::A, Some("A"), false, true, false).unwrap();
+        assert_eq!((ev.logical_key, ev.text.as_deref(), ev.shift), (Key::Character("A".into()), Some("A"), true));
+        let ev = list_key_event(K::v, Some("\u{16}"), true, false, false).unwrap();
+        assert_eq!((ev.logical_key, ev.ctrl), (Key::Character("v".into()), true));
+        for (sym, name) in [
+            (K::Home, NamedKey::Home),
+            (K::End, NamedKey::End),
+            (K::Delete, NamedKey::Delete),
+            (K::space, NamedKey::Space),
+        ] {
+            assert_eq!(list_key_event(sym, None, false, false, false).unwrap().logical_key, Key::Named(name));
+        }
+        assert!(list_key_event(K::Shift_L, None, false, true, false).is_none());
+        assert!(list_key_event(K::F5, None, true, false, false).is_none());
+
+        // The DE's undo and redo chords, as the runner matches them: Shift
+        // turns the keysym upper case, and the chord is still `z`.
+        let undo = list_key_event(K::z, Some("\u{1a}"), true, false, false).unwrap();
+        let redo = list_key_event(K::Z, Some("\u{1a}"), true, true, false).unwrap();
+        assert!(match_key_shortcut(&undo, "ctrl+z") && !match_key_shortcut(&undo, "ctrl+shift+z"));
+        assert!(match_key_shortcut(&redo, "ctrl+shift+z") && !match_key_shortcut(&redo, "ctrl+z"));
+    }
+
+    /// What the query does with the keys it used to drop: arrows and Home
+    /// move the caret, Backspace deletes before it, Shift selects, Ctrl+A
+    /// selects all and typing replaces the selection; an Alt chord types
+    /// nothing.
+    #[test]
+    fn the_query_edits_like_a_field() {
+        let mut q = LineEdit::default();
+        for (sym, t) in [(K::t, "t"), (K::e, "e"), (K::r, "r"), (K::m, "m")] {
+            press(&mut q, sym, Some(t), false, false);
+        }
+        assert_eq!((q.text.as_str(), q.cursor), ("term", 4));
+        press(&mut q, K::Left, None, false, false);
+        press(&mut q, K::Left, None, false, false);
+        press(&mut q, K::BackSpace, Some("\u{8}"), false, false);
+        assert_eq!((q.text.as_str(), q.cursor), ("trm", 1));
+        press(&mut q, K::Home, None, false, false);
+        assert_eq!(q.cursor, 0);
+        press(&mut q, K::End, None, false, true);
+        assert_eq!(q.selection, Some((0, 3)));
+        press(&mut q, K::Home, None, false, false);
+        press(&mut q, K::a, Some("\u{1}"), true, false);
+        assert_eq!(q.selection, Some((0, 3)), "Ctrl+A");
+        press(&mut q, K::x, Some("x"), false, false);
+        assert_eq!((q.text.as_str(), q.selection), ("x", None));
+        assert!(q.undo(), "typing over the selection is one step");
+        assert_eq!(q.text, "trm");
+        q.handle_key(&list_key_event(K::f, Some("f"), false, false, true).unwrap());
+        assert_eq!(q.text, "trm", "Alt+F types nothing");
+    }
+
+    /// The caret and the selection stand where the label's glyphs are drawn:
+    /// the prompt and the query are measured as the one label they are, and
+    /// at every boundary the measured x is the x of the buffer this app draws
+    /// the label from (`make_text_buffer`), multi-byte text included.
+    #[test]
+    fn the_caret_stands_on_the_drawn_glyphs() {
+        let mut fs = cce_ui::create_font_system();
+        let mut f = FuzzelWidget::new("Search: ".to_string());
+        f.w = 400.0;
+        f.h = 200.0;
+        let p = f.prompt.len();
+        for text in ["term", "fi fl ffi", "aé日b"] {
+            f.query = LineEdit::with_text(text);
+            let label = f.query_label().text;
+            let drawn = cce_ui::text::shaped_run(&make_text_buffer(&mut fs, &label, QUERY_PX), &label, 1.0);
+            let bounds: Vec<usize> = text.char_indices().map(|(i, _)| i).chain([text.len()]).collect();
+            for &b in &bounds {
+                f.query.cursor = b;
+                f.query.selection = (b > 0).then_some((0, b));
+                f.measure_query(&mut fs);
+                let (want, sel_from) = (drawn.x_of(p + b), drawn.x_of(p));
+                assert!((f.query_marks.caret - want).abs() < 0.01, "{text:?} at {b}: caret {} drawn {want}", f.query_marks.caret);
+                if b > 0 {
+                    let sel = &f.query_marks.selection;
+                    assert!(sel.len() == 1 && (sel[0].0 - sel_from).abs() < 0.01 && (sel[0].1 - want).abs() < 0.01, "{text:?} at {b}: {sel:?}");
+                }
+                assert_eq!(f.query_scroll, 0.0, "a line that fits never scrolls");
+            }
+        }
+    }
+
+    /// A query longer than the well scrolls to keep the caret inside it, and
+    /// comes back as far as the caret does: Home brings the query's start to
+    /// the text's edge, the prompt still scrolled off before it.
+    #[test]
+    fn a_long_query_scrolls_with_the_caret() {
+        let mut fs = cce_ui::create_font_system();
+        let mut f = FuzzelWidget::new("> ".to_string());
+        f.w = 160.0;
+        f.h = 200.0;
+        f.query = LineEdit::with_text("a query far too long for so narrow a popup");
+        f.measure_query(&mut fs);
+        let area = f.query_area();
+        let caret_x = f.text_x() - f.query_scroll + f.query_marks.caret;
+        assert!(f.query_scroll > 0.0);
+        assert!(caret_x + cce_ui::widget::line_edit::CARET_W <= area.x + area.width + 0.01, "caret {caret_x} in {area:?}");
+        press(&mut f.query, K::Home, None, false, false);
+        f.measure_query(&mut fs);
+        assert!(f.query_marks.caret > 0.0 && (f.query_scroll - f.query_marks.caret).abs() < 0.01, "{}", f.query_scroll);
     }
 }

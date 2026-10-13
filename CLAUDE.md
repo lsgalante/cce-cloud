@@ -10,7 +10,7 @@ JSON-defined popup panel — all in one binary. It is one crate of the cce multi
 workspace; workspace-wide conventions (multi-repo layout, no `[workspace.dependencies]`,
 shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that too.
 
-Two source files, all logic in `src/main.rs` (~5.6k lines):
+Two source files, all logic in `src/main.rs` (~5.8k lines):
 
 - `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland
   surface and event loop, `FuzzelWidget` (the list UI: keyboard selection chip,
@@ -198,7 +198,8 @@ Three things to know before touching it:
   `TabPage`.** Every pre-existing caller reads them there, and only
   `switch_tab` moves them across — so a page's own copies are stale for as long
   as it is the active one. Parking the query is what makes switching back land
-  on the same filtered rows.
+  on the same filtered rows — and, since it is a `LineEdit`, on the same caret,
+  selection and undo history.
 - **The stdin/socket feed addresses tab 0, through `set_tab_items`,** never
   `set_items` directly. `check_stdin_updates` skips the ingest when the items
   match what it last pushed; compared against the *active* tab that test would
@@ -233,6 +234,50 @@ commit path makes). The window verbs act on the window *behind* the popup — th
 compositor's `focused_window` skips overlay UI and names `cce-cloud` among it,
 falling back to the most recent real window — which is the only reason "Close
 Window" from a launcher means anything.
+
+### The query line
+
+The search line is a `cce_ui::widget::LineEdit` (`FuzzelWidget::query`, and
+each parked `TabPage::query`): a caret, a selection, Ctrl+arrow word moves,
+Delete and Ctrl+Backspace/Delete, Ctrl+A / U / V / C / X, and undo. Until
+2026-10-12 it was a bare `String` — Backspace popped, every other key pushed
+its text, Left/Right/Home/End/Delete did nothing, and Ctrl+V's text (a control
+character) was filtered out.
+
+- **Keys.** `AppState::handle_key` builds a whole toolkit `KeyEvent`
+  (`list_key_event`): Shift, Ctrl and Alt tracked in `update_modifiers`;
+  Home, End and Delete named; a Ctrl chord's key read off the keysym, because
+  under Ctrl the utf8 is a control character. The list's own keys go first,
+  as they always have — Escape, Enter, Tab / Shift+Tab, Up / Down and the
+  nav chords — then the DE's undo / redo chords (`edit_chords`: input.kdl's
+  `undo` / `redo`, Ctrl+Z / Ctrl+Shift+Z, matched here because there is no
+  runner to route them; Ctrl+Y redoes inside `LineEdit`), then
+  `LineEdit::handle_key`. The list is re-filtered only when the text changed.
+  An Alt chord types nothing (the toolkit's rule), except in the switcher,
+  where Alt is the key holding the popup open, so the event goes out with alt
+  clear and typing under Alt+Tab still filters. The JSON panel's key path is
+  untouched: its widgets get the same keys, without Shift or Alt, as before.
+- **Measuring.** `measure_query` runs before every paint
+  (`State::upload_vertices`), because it needs the app's `FontSystem` and the
+  paint walk carries none. The prompt and the query are ONE label
+  (`query_label`), so they are measured as one: `LineMarks::of` over an edit
+  of the whole line, its caret and selection shifted past the prompt, in the
+  control font at `QUERY_PX`. `make_text_buffer` picks its shaping with
+  `cce_ui::text::shaping_for`, so every label is shaped as `LineMarks`
+  measures (it was always `Advanced` before; the two agree glyph for glyph in
+  Berkeley Mono). `the_caret_stands_on_the_drawn_glyphs` pins the agreement,
+  multi-byte text included.
+- **Painting.** `paint_line` paints the selection and the caret, handed the
+  marks with nothing shown and no placeholder, since the text is this app's
+  own label, drawn by its own text pass. Its area (`query_area`) is centred on
+  the label's ink, not on the well: this app's labels sit in a line
+  `LABEL_LINE_H` (1.4) times their size, where `paint_line` assumes a
+  `Prim::Text`'s, exactly the size, and centred on the well the caret stood
+  1.3px high. A query longer than the widest popup scrolls with the caret
+  (`keep_caret`, `query_scroll`), the label cut at the well (`query_clip`).
+- **Not wired:** an input method (this app runs its own Wayland loop with no
+  text-input-v3, so nothing feeds `cce_ui::ime`; `LineEdit::sync_ime` is a
+  no-op here) and the pointer — a click in the well does not place the caret.
 
 ### Rendering: hand-rolled loop on `cce_ui::vk`, not the cce-ui engine runner
 
