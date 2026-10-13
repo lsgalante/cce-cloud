@@ -373,8 +373,14 @@ impl Chooser {
 }
 
 fn scan_apps() -> Vec<AppInfo> {
+    scan_apps_in(application_dirs())
+}
+
+/// [`scan_apps`] over explicit `dirs`, highest precedence first.
+fn scan_apps_in(dirs: Vec<std::path::PathBuf>) -> Vec<AppInfo> {
+    // (desktop-file ID, entry): the ID is what tells two same-named apps
+    // apart when nothing else does.
     let mut apps = Vec::new();
-    let dirs = application_dirs();
 
     // The first file claiming a desktop-file ID (the file stem) shadows that
     // ID in every later dir — even when the winning entry is itself
@@ -392,7 +398,7 @@ fn scan_apps() -> Vec<AppInfo> {
                         continue;
                     }
                     if let Some(app) = parse_desktop_file(&path) {
-                        apps.push(app);
+                        apps.push((id.to_string(), app));
                     }
                 }
             }
@@ -402,12 +408,48 @@ fn scan_apps() -> Vec<AppInfo> {
     // Terminal=true apps need an emulator to host them; with none installed,
     // spawning them bare would fail silently, so drop the entries instead.
     if terminal_emulator().is_none() {
-        apps.retain(|app| !app.terminal);
+        apps.retain(|(_, app)| !app.terminal);
     }
 
-    apps.sort_by(|a, b| a.name.cmp(&b.name));
-    apps.dedup_by(|a, b| a.name == b.name);
-    apps
+    // One app installed twice under different IDs (a distro entry and a
+    // user copy, which ID shadowing cannot catch) collapses to the
+    // higher-precedence entry — but only when the command matches too.
+    // Matching on the name alone silently dropped a different app that
+    // happened to share it: cce-claude vanished behind the Claude desktop
+    // app's "Claude", the survivor decided by read_dir order. The sorts are
+    // stable, so scan (precedence) order decides which copy stays.
+    apps.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name).then_with(|| a.exec.cmp(&b.exec)));
+    apps.dedup_by(|(_, a), (_, b)| a.name == b.name && a.exec == b.exec);
+    disambiguate_names(apps)
+}
+
+/// The program an `Exec=` runs: its first word, without a directory.
+fn exec_program(exec: &str) -> &str {
+    let first = exec.split_whitespace().next().unwrap_or("");
+    first.rsplit('/').next().unwrap_or(first)
+}
+
+/// Different apps that share a `Name=` each keep a row, told apart by their
+/// program — `Claude (cce-claude)`, `Claude (claude-desktop)` — or by
+/// desktop-file ID where the program is shared too (`flatpak run …`, one
+/// binary with different flags). The name is every row's key (label, icon,
+/// the launch lookup, history), so it has to be unique. `apps` arrives
+/// sorted by name.
+fn disambiguate_names(apps: Vec<(String, AppInfo)>) -> Vec<AppInfo> {
+    let mut out = Vec::with_capacity(apps.len());
+    for group in apps.chunk_by(|(_, a), (_, b)| a.name == b.name) {
+        let progs: Vec<&str> = group.iter().map(|(_, app)| exec_program(&app.exec)).collect();
+        for ((id, app), prog) in group.iter().zip(&progs) {
+            let mut app = app.clone();
+            if group.len() > 1 {
+                let unique = !prog.is_empty() && progs.iter().filter(|p| *p == prog).count() == 1;
+                let tag = if unique { prog } else { id.as_str() };
+                app.name = format!("{} ({tag})", app.name);
+            }
+            out.push(app);
+        }
+    }
+    out
 }
 
 /// A Super-Tab switcher row split into `(title, app_id)`. The compositor
@@ -572,8 +614,7 @@ fn spawn_command(cmd: &str) {
 /// keeps its remembered place — there is no "here" to mean.
 fn place_next_at(exec: &str, invoked_at: Option<(i32, i32)>) {
     let Some((x, y)) = invoked_at else { return };
-    let first = exec.split_whitespace().next().unwrap_or("");
-    let prog = first.rsplit('/').next().unwrap_or(first);
+    let prog = exec_program(exec);
     if prog.is_empty() {
         return;
     }
@@ -5359,6 +5400,58 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "My Editor");
         assert_eq!(apps[0].exec, "editor-user");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A shared `Name=` collapses only the same app installed twice; two
+    /// different apps that share it both stay, labelled apart. Drives
+    /// `scan_apps_in` directly: a second test setting XDG_DATA_* would race
+    /// `scan_apps_xdg_precedence` for the process env.
+    #[test]
+    fn scan_apps_same_name_keeps_different_apps() {
+        let base = std::env::temp_dir().join("cce-cloud-test-same-name");
+        let _ = std::fs::remove_dir_all(&base);
+        let user = base.join("home/applications");
+        let sys = base.join("sys/applications");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&sys).unwrap();
+        let entry = |dir: &std::path::Path, id: &str, name: &str, exec: &str, icon: &str| {
+            std::fs::write(
+                dir.join(format!("{id}.desktop")),
+                format!("[Desktop Entry]\nType=Application\nName={name}\nExec={exec}\nIcon={icon}\n"),
+            )
+            .unwrap();
+        };
+
+        // Same app under two IDs; the commands match once field codes go.
+        entry(&sys, "org.example.Editor", "Editor", "editor %F", "editor-sys");
+        entry(&user, "editor-copy", "Editor", "editor", "editor-user");
+        // Different apps, one name (the 2026-10-13 cce-claude case).
+        entry(&sys, "cce-claude", "Claude", "cce-claude", "");
+        entry(&user, "com.anthropic.Claude", "Claude", "/usr/bin/claude-desktop %u", "");
+        // One program run two ways: only the ID tells them apart.
+        entry(&sys, "firefox", "Firefox", "firefox %u", "");
+        entry(&sys, "firefox-work", "Firefox", "firefox -P work %u", "");
+
+        let apps = scan_apps_in(vec![user.clone(), sys.clone()]);
+        let mut names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "Claude (cce-claude)",
+                "Claude (claude-desktop)",
+                "Editor",
+                "Firefox (firefox)",
+                "Firefox (firefox-work)",
+            ]
+        );
+        // The collapsed pair keeps the higher-precedence (user) entry.
+        let editor = apps.iter().find(|a| a.name == "Editor").unwrap();
+        assert_eq!(editor.icon.as_deref(), Some("editor-user"));
+        let claude = apps.iter().find(|a| a.name == "Claude (cce-claude)").unwrap();
+        assert_eq!(claude.exec, "cce-claude");
 
         let _ = std::fs::remove_dir_all(&base);
     }

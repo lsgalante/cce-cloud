@@ -116,7 +116,14 @@ roundtrip is when the seat announces its keyboard. Until 2026-09-26 it was
 bound with plain `get_keyboard`, and a held Backspace deleted one character.
 
 - `Apps` — `.desktop` files from the standard application dirs, sorted by launch
-  frecency persisted in `~/.cache/cce-cloud-apps.json`; selecting spawns the app's
+  frecency persisted in `~/.cache/cce-cloud-apps.json`. A desktop-file ID is
+  claimed by its highest-precedence file; beyond that, two entries collapse
+  only when both `Name=` and field-code-stripped `Exec=` match (one app
+  installed twice), and different apps sharing a name both stay, labelled
+  `Name (program)` or, when the program is shared too, `Name (id)`
+  (`disambiguate_names`) — the name is the row's key everywhere. Until
+  2026-10-13 a name match alone collapsed them, and cce-claude vanished behind
+  the Claude desktop app's "Claude". Selecting spawns the app's
   `Exec` (spawn output logged to `$XDG_RUNTIME_DIR/cce/spawn.log`, via
   `cce_ui::config::cce_runtime_dir()` — it was `/tmp/cce-spawn.log` before
   2026-08-22). Every launch (`spawn_detached`) runs in **its own transient
