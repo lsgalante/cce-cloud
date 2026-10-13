@@ -730,7 +730,7 @@ impl cce_ui::widget::Paint for JsonLayoutWidget {
 
     fn paint(&self, _rect: cce_ui::scene::layout::Rect, pc: &mut cce_ui::scene::paint::PaintCtx) {
         use cce_ui::scene::layout::Rect;
-        use cce_ui::scene::paint::{PaintCtx, Prim};
+        use cce_ui::scene::paint::PaintCtx;
         // The children are Phase 5 Adapted leaves: nothing their all_* getters or the
         // label walk reads comes from the routing context, so a fresh one stands in for
         // the ctx `Paint::paint` does not carry.

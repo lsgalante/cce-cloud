@@ -3057,7 +3057,6 @@ impl PointerHandler for AppState {
                             self.redraw = true;
                         }
                     }
-                    _ => {}
                 }
             }
         }
