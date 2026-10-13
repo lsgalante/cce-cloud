@@ -16,6 +16,8 @@ log = "0.4"
 env_logger = "0.11"
 libc = "0.2"
 
-
-
-
+[lints.clippy]
+# The toolkit's house style (cce-ui's [lints.clippy]): state and geometry
+# taken piecewise, and the tuple views.
+too_many_arguments = "allow"
+type_complexity = "allow"

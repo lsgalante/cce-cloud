@@ -388,7 +388,7 @@ impl JsonLayoutWidget {
         let pad_x = cce_ui::layout::root_plate_inset();
         let usable_w = bw - 2.0 * pad_x;
 
-        let mut page_current_y = vec![pad_x; 16]; // support up to 16 pages
+        let mut page_current_y = [pad_x; 16]; // support up to 16 pages
         let spacing = cce_ui::layout::root_plate_gap();
 
         for i in 0..self.widgets.len() {
@@ -549,15 +549,13 @@ impl JsonLayoutWidget {
                     }
                 }
             }
-            Event::MouseButton { button, state, x: _, y: _, .. } => {
-                if *button == MouseButton::Left && *state == ElementState::Released {
-                    if let Some(idx) = self.dragging_slider_idx {
-                        if let Some(w) = self.widgets.get_mut(idx) {
-                            w.widget.as_dyn_mut().handle_event(event, ctx);
-                            changed = true;
-                        }
-                        self.dragging_slider_idx = None;
+            Event::MouseButton { button, state, .. } if *button == MouseButton::Left && *state == ElementState::Released => {
+                if let Some(idx) = self.dragging_slider_idx {
+                    if let Some(w) = self.widgets.get_mut(idx) {
+                        w.widget.as_dyn_mut().handle_event(event, ctx);
+                        changed = true;
                     }
+                    self.dragging_slider_idx = None;
                 }
             }
             _ => {}
@@ -591,19 +589,17 @@ impl JsonLayoutWidget {
                             }
                         }
                     }
-                    Event::MouseButton { button, state, x, y, .. } => {
-                        if *button == MouseButton::Left {
-                            let hit = *x >= w.x && *x <= w.x + w.w && *y >= w.y && *y <= w.y + w.h;
-                            if hit {
-                                if *state == ElementState::Pressed {
-                                    changed = true;
-                                } else if *state == ElementState::Released {
-                                    if let Some(cb) = w.widget.as_dyn_mut().as_any_mut().downcast_mut::<Checkbox>() {
-                                        let new_checked = !cb.checked();
-                                        cb.set_checked(new_checked);
-                                    }
-                                    changed = true;
+                    Event::MouseButton { button, state, x, y, .. } if *button == MouseButton::Left => {
+                        let hit = *x >= w.x && *x <= w.x + w.w && *y >= w.y && *y <= w.y + w.h;
+                        if hit {
+                            if *state == ElementState::Pressed {
+                                changed = true;
+                            } else if *state == ElementState::Released {
+                                if let Some(cb) = w.widget.as_dyn_mut().as_any_mut().downcast_mut::<Checkbox>() {
+                                    let new_checked = !cb.checked();
+                                    cb.set_checked(new_checked);
                                 }
+                                changed = true;
                             }
                         }
                     }
@@ -616,8 +612,10 @@ impl JsonLayoutWidget {
                 if w.widget_type == "button" {
                     // take_click is an WidgetHost method; the Phase 5 Button is Adapted, so call it
                     // on the box directly rather than through a concrete downcast.
-                    if w.target_page.is_some() && w.widget.take_click() {
-                        page_switch = Some(w.target_page.unwrap());
+                    if let Some(target) = w.target_page {
+                        if w.widget.take_click() {
+                            page_switch = Some(target);
+                        }
                     }
                 }
             }
@@ -631,57 +629,53 @@ impl JsonLayoutWidget {
 
         if let Event::MouseWheel { delta, x, y, .. } = event {
             let (bx, by, bw, bh) = self.rect();
-            if *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh {
-                if active_page < self.page_total_heights.len() {
-                    let total_height = self.page_total_heights[active_page];
-                    let visible_h = bh;
-                    let max_scroll_y = (total_height - visible_h).max(0.0);
-                    if max_scroll_y > 0.0 {
-                        // A notch is LINE_PX, pixels are 1:1; the motion
-                        // glides or tracks and `tick_scroll` carries the drawn
-                        // offset after it. A true return is the repaint signal
-                        // (the target moved even if the offset has not yet).
-                        let motion = &mut self.page_scroll[active_page];
-                        motion.reconcile(0.0, self.page_scroll_y[active_page]);
-                        if motion.apply(delta, (LINE_PX, LINE_PX), Bounds::max(0.0), Bounds::max(max_scroll_y)) {
-                            changed = true;
-                        }
-                        if self.sync_page_scroll(active_page) {
-                            self.layout_children();
-                        }
+            if *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh && active_page < self.page_total_heights.len() {
+                let total_height = self.page_total_heights[active_page];
+                let visible_h = bh;
+                let max_scroll_y = (total_height - visible_h).max(0.0);
+                if max_scroll_y > 0.0 {
+                    // A notch is LINE_PX, pixels are 1:1; the motion
+                    // glides or tracks and `tick_scroll` carries the drawn
+                    // offset after it. A true return is the repaint signal
+                    // (the target moved even if the offset has not yet).
+                    let motion = &mut self.page_scroll[active_page];
+                    motion.reconcile(0.0, self.page_scroll_y[active_page]);
+                    if motion.apply(delta, (LINE_PX, LINE_PX), Bounds::max(0.0), Bounds::max(max_scroll_y)) {
+                        changed = true;
+                    }
+                    if self.sync_page_scroll(active_page) {
+                        self.layout_children();
                     }
                 }
             }
         }
 
         if let Event::KeyInput(key_event) = event {
-            if key_event.state == ElementState::Pressed {
-                if active_page < self.page_total_heights.len() {
-                    let (_, _, _, bh) = self.rect();
-                    let by = self.page_scroll_bounds(active_page);
-                    if by.hi > 0.0 {
-                        // Pages and Home/End glide to their target; the arrows
-                        // step a line and accumulate like wheel notches (the
-                        // toolkit ScrollRegion's keyboard contract).
-                        let s = scroll_settings();
-                        let motion = &mut self.page_scroll[active_page];
-                        motion.reconcile(0.0, self.page_scroll_y[active_page]);
-                        let target = motion.y.target();
-                        let moved = match &key_event.logical_key {
-                            Key::Named(NamedKey::PageDown) => motion.y.scroll_to(target + bh, by, &s),
-                            Key::Named(NamedKey::PageUp) => motion.y.scroll_to(target - bh, by, &s),
-                            Key::Named(NamedKey::Home) => motion.y.scroll_to(0.0, by, &s),
-                            Key::Named(NamedKey::End) => motion.y.scroll_to(by.hi, by, &s),
-                            Key::Named(NamedKey::ArrowDown) => motion.y.wheel(LINE_PX, by, &s),
-                            Key::Named(NamedKey::ArrowUp) => motion.y.wheel(-LINE_PX, by, &s),
-                            _ => false,
-                        };
-                        if moved {
-                            changed = true;
-                        }
-                        if self.sync_page_scroll(active_page) {
-                            self.layout_children();
-                        }
+            if key_event.state == ElementState::Pressed && active_page < self.page_total_heights.len() {
+                let (_, _, _, bh) = self.rect();
+                let by = self.page_scroll_bounds(active_page);
+                if by.hi > 0.0 {
+                    // Pages and Home/End glide to their target; the arrows
+                    // step a line and accumulate like wheel notches (the
+                    // toolkit ScrollRegion's keyboard contract).
+                    let s = scroll_settings();
+                    let motion = &mut self.page_scroll[active_page];
+                    motion.reconcile(0.0, self.page_scroll_y[active_page]);
+                    let target = motion.y.target();
+                    let moved = match &key_event.logical_key {
+                        Key::Named(NamedKey::PageDown) => motion.y.scroll_to(target + bh, by, &s),
+                        Key::Named(NamedKey::PageUp) => motion.y.scroll_to(target - bh, by, &s),
+                        Key::Named(NamedKey::Home) => motion.y.scroll_to(0.0, by, &s),
+                        Key::Named(NamedKey::End) => motion.y.scroll_to(by.hi, by, &s),
+                        Key::Named(NamedKey::ArrowDown) => motion.y.wheel(LINE_PX, by, &s),
+                        Key::Named(NamedKey::ArrowUp) => motion.y.wheel(-LINE_PX, by, &s),
+                        _ => false,
+                    };
+                    if moved {
+                        changed = true;
+                    }
+                    if self.sync_page_scroll(active_page) {
+                        self.layout_children();
                     }
                 }
             }

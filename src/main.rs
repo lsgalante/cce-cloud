@@ -216,26 +216,24 @@ fn scan_path() -> Vec<String> {
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in path_var.split(':') {
             if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries {
-                    if let Ok(entry) = entry {
-                        let path = entry.path();
-                        if path.is_file() {
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                if let Ok(metadata) = entry.metadata() {
-                                    if metadata.permissions().mode() & 0o111 != 0 {
-                                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                            executables.insert(name.to_string());
-                                        }
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            if let Ok(metadata) = entry.metadata() {
+                                if metadata.permissions().mode() & 0o111 != 0 {
+                                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                        executables.insert(name.to_string());
                                     }
                                 }
                             }
-                            #[cfg(not(unix))]
-                            {
-                                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                                    executables.insert(name.to_string());
-                                }
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                executables.insert(name.to_string());
                             }
                         }
                     }
@@ -390,7 +388,7 @@ fn scan_apps_in(dirs: Vec<std::path::PathBuf>) -> Vec<AppInfo> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_file() && path.extension().map_or(false, |ext| ext == "desktop") {
+                if path.is_file() && path.extension().is_some_and(|ext| ext == "desktop") {
                     let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
                         continue;
                     };
@@ -481,7 +479,7 @@ fn desktop_icon_index(dirs: &[std::path::PathBuf]) -> std::collections::HashMap<
         let Ok(entries) = std::fs::read_dir(dir) else { continue };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(true, |ext| ext != "desktop") {
+            if path.extension().is_none_or(|ext| ext != "desktop") {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
@@ -576,7 +574,7 @@ fn record_app_launch(app_name: &str) {
     save_history(&history);
 }
 
-fn sort_apps_by_history(apps: &mut Vec<AppInfo>) {
+fn sort_apps_by_history(apps: &mut [AppInfo]) {
     let history = load_history();
     apps.sort_by(|a, b| {
         let hist_a = history.get(&a.name);
@@ -2105,24 +2103,23 @@ impl State {
             std::thread::spawn(move || {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
-                    if let Ok(line) = line {
-                        if let Ok(mut lock_state) = stdin_state_clone.lock() {
-                            if line == "__cce_switcher_next__" {
-                                lock_state.cycle_next += 1;
-                                lock_state.new_data = true;
-                            } else if line == "__cce_switcher_prev__" {
-                                lock_state.cycle_prev += 1;
-                                lock_state.new_data = true;
-                            } else if line == "__cce_switcher_select_and_close__" {
-                                lock_state.select_and_close = true;
-                                lock_state.new_data = true;
-                            } else {
-                                lock_state.items.push(line);
-                                lock_state.new_data = true;
-                            }
+                let Ok(line) = line else { continue };
+                    if let Ok(mut lock_state) = stdin_state_clone.lock() {
+                        if line == "__cce_switcher_next__" {
+                            lock_state.cycle_next += 1;
+                            lock_state.new_data = true;
+                        } else if line == "__cce_switcher_prev__" {
+                            lock_state.cycle_prev += 1;
+                            lock_state.new_data = true;
+                        } else if line == "__cce_switcher_select_and_close__" {
+                            lock_state.select_and_close = true;
+                            lock_state.new_data = true;
+                        } else {
+                            lock_state.items.push(line);
+                            lock_state.new_data = true;
                         }
-                        let _ = stdin_sender.send(());
                     }
+                    let _ = stdin_sender.send(());
                 }
             });
         } else if mode == LauncherMode::Apps {
@@ -4059,10 +4056,9 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
         use std::io::BufRead;
         let stdin = std::io::stdin();
         for line in stdin.lock().lines() {
-            if let Ok(line) = line {
-                let _ = stream_clone.write_all(line.as_bytes());
-                let _ = stream_clone.write_all(b"\n");
-            }
+        let Ok(line) = line else { continue };
+            let _ = stream_clone.write_all(line.as_bytes());
+            let _ = stream_clone.write_all(b"\n");
         }
     });
 
@@ -5116,7 +5112,7 @@ mod tests {
         assert_eq!(w_btn_w, usable_w);
 
         // Verify Checkbox initial state
-        assert_eq!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), false);
+        assert!(!layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked());
 
         // Simulate click on Checkbox row
         let changed = layout.mouse_input(
@@ -5127,7 +5123,7 @@ mod tests {
             &mut ctx,
         );
         assert!(changed);
-        assert_eq!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked(), true);
+        assert!(layout.widgets[1].widget.as_dyn().as_any().downcast_ref::<cce_ui::widget::Checkbox>().unwrap().checked());
 
         // Simulate hover on button
         let changed_hover = layout.on_cursor_moved(w_btn_x + 10.0, w_btn_y + 10.0, &mut ctx);
