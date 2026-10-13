@@ -544,7 +544,7 @@ fn sort_apps_by_history(apps: &mut Vec<AppInfo>) {
 }
 
 fn spawn_command(cmd: &str) {
-    spawn_detached("sh", &["-c", cmd]);
+    launch_in_scope("sh", &["-c", cmd]);
 }
 
 /// Open the launched window at the grid square this launcher was invoked at,
@@ -572,7 +572,7 @@ fn place_next_at(exec: &str, invoked_at: Option<(i32, i32)>) {
 fn spawn_app(app: &AppInfo) {
     if app.terminal {
         if let Some(term) = terminal_emulator() {
-            spawn_detached(&term, &["sh", "-c", &format!("exec {}", app.exec)]);
+            launch_in_scope(&term, &["sh", "-c", &format!("exec {}", app.exec)]);
             return;
         }
     }
@@ -676,7 +676,7 @@ fn scope_argv(program: &str, args: &[&str], n: u128) -> Vec<String> {
     argv
 }
 
-fn spawn_detached(program: &str, args: &[&str]) {
+fn launch_in_scope(program: &str, args: &[&str]) {
     // Launched apps must outlive this daemon but not the session. Each gets
     // its own transient scope (`scope_argv`): a service restart signals only
     // the daemon (cce-cloud.service's KillMode=process) and never reaches
@@ -715,22 +715,11 @@ fn spawn_detached(program: &str, args: &[&str]) {
         let _ = writeln!(f, "[spawn] executing: {} {}", program, args.join(" "));
         cmd.stdout(f.try_clone().unwrap()).stderr(f);
     }
-    // Through the reaping spawn below, NOT a bare `cmd.spawn()`: the daemon
-    // lives for the whole session, and a dropped Child handle means every app
-    // it ever launched sits in the process table as a zombie once it exits —
+    // Through the reaping spawn, NOT a bare `cmd.spawn()`: the daemon lives
+    // for the whole session, and a dropped Child handle means every app it
+    // ever launched sits in the process table as a zombie once it exits —
     // unreadable in /proc and reported "alive" by kill(pid, 0) probes.
-    let _ = spawn_reaped(cmd);
-}
-
-/// Spawn `cmd` and reap it on a background thread. This was
-/// `cce_ui::process::spawn_detached` until the toolkit dropped that module
-/// (cce-ui 4e94236) as caller-less — `spawn_detached` above was a caller.
-fn spawn_reaped(mut cmd: std::process::Command) -> std::io::Result<()> {
-    let mut child = cmd.spawn()?;
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    let _ = cce_ui::process::spawn_detached(cmd);
 }
 
 
@@ -796,7 +785,7 @@ fn run_system_item(fuzzel: &FuzzelWidget, item: &str) -> bool {
     let Some(cmd) = SYSTEM_COMMANDS.iter().find(|c| c.name == item) else {
         return false;
     };
-    spawn_detached(cmd.program, cmd.args);
+    launch_in_scope(cmd.program, cmd.args);
     true
 }
 
@@ -4537,16 +4526,15 @@ fn main() {
     let args = std::env::args().collect::<Vec<String>>();
     let is_daemon = args.iter().any(|arg| arg == "--daemon");
 
-    let uid = unsafe { libc::getuid() };
-    let socket_dir = format!("/run/user/{}", uid);
     // Key the socket by display so a nested/second compositor session gets its
     // own daemon instead of hijacking (or being hijacked by) another session's.
+    // In the session's runtime dir (`/run/user/UID`); outside a login session
+    // `runtime_dir` falls back to the temp dir, as every cce socket does.
     let display = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
-    let socket_path = if std::path::Path::new(&socket_dir).exists() {
-        format!("{}/cce-cloud-{}.socket", socket_dir, display)
-    } else {
-        format!("/tmp/cce-cloud-{}-{}.socket", uid, display)
-    };
+    let socket_path = cce_ui::config::runtime_dir()
+        .join(format!("cce-cloud-{display}.socket"))
+        .to_string_lossy()
+        .into_owned();
 
     if is_daemon {
         run_daemon(&socket_path);
@@ -4973,7 +4961,7 @@ mod tests {
 
     #[test]
     fn parse_desktop_terminal_flag() {
-        let dir = std::path::PathBuf::from("/tmp/cce-cloud-test-desktop-dir");
+        let dir = std::env::temp_dir().join("cce-cloud-test-desktop-dir");
         let _ = std::fs::create_dir_all(&dir);
 
         let path = dir.join("htop.desktop");
@@ -5011,7 +4999,7 @@ mod tests {
 
     #[test]
     fn app_ids_resolve_through_their_desktop_entry() {
-        let base = std::path::PathBuf::from("/tmp/cce-cloud-test-icon-index");
+        let base = std::env::temp_dir().join("cce-cloud-test-icon-index");
         let _ = std::fs::remove_dir_all(&base);
         let user = base.join("user");
         let sys = base.join("sys");
@@ -5051,7 +5039,7 @@ mod tests {
 
     #[test]
     fn icon_override_is_keyed_by_desktop_id() {
-        let dir = std::path::PathBuf::from("/tmp/cce-cloud-test-icon-override");
+        let dir = std::env::temp_dir().join("cce-cloud-test-icon-override");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("houdini.svg"), "<svg/>").unwrap();
@@ -5107,7 +5095,7 @@ mod tests {
 
     #[test]
     fn scan_apps_xdg_precedence() {
-        let base = std::path::PathBuf::from("/tmp/cce-cloud-test-xdg");
+        let base = std::env::temp_dir().join("cce-cloud-test-xdg");
         let _ = std::fs::remove_dir_all(&base);
         let user = base.join("home/applications");
         let sys = base.join("sys/applications");
@@ -5274,7 +5262,7 @@ mod tests {
 
     #[test]
     fn test_app_history_sorting() {
-        let temp_dir = std::path::PathBuf::from("/tmp/cce-cloud-test-cache-dir");
+        let temp_dir = std::env::temp_dir().join("cce-cloud-test-cache-dir");
         let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
 
