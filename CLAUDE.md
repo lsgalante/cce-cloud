@@ -61,8 +61,9 @@ cce-cloud --daemon                       # run the daemon (normally started by t
 
 `main()` (bottom of `src/main.rs`) picks one of three roles:
 
-- `--daemon`: `run_daemon()` binds `/run/user/$UID/cce-cloud.socket` (fallback
-  `/tmp/cce-cloud-$UID.socket`), holds one long-lived Wayland connection, and serves
+- `--daemon`: `run_daemon()` binds `cce-cloud-<WAYLAND_DISPLAY>.socket` in the runtime
+  dir (`$XDG_RUNTIME_DIR`, else the temp dir), so a second compositor session gets its
+  own daemon; it holds one long-lived Wayland connection, and serves
   **one popup at a time, serially**. A new client connection **preempts** the currently
   open popup (global single-popup semantics); a client hangup closes the popup
   (`StdinState.client_gone`).
