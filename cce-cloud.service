@@ -1,6 +1,6 @@
 [Unit]
 Description=CCE Cloud Menu Daemon
-# Bound to ONE compositor's life, like cce-grid: startcce starts
+# Bound to ONE compositor's life, like cce-desktop: startcce starts
 # cce-session.target after the compositor is up and stops it when it exits.
 # It was graphical-session.target until 2026-09-25, which does not reliably
 # stop at logout (a queued start job elsewhere, dropbox's, made the stop
@@ -29,7 +29,7 @@ Environment=RUST_LOG=info
 # things — .desktop entries whose Exec= is a bare name by DE convention
 # (`Exec=cce-browser %u`), and the apps the launcher spawns inherit this
 # environment. Drop this line and every one of them fails with ENOENT, from a
-# launcher that looks like it did nothing. cce-grid had no equivalent, which
+# launcher that looks like it did nothing. cce-desktop had no equivalent, which
 # is exactly how its context menu shipped silently broken.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 
