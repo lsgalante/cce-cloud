@@ -10,7 +10,7 @@ JSON-defined popup panel — all in one binary. It is one crate of the cce multi
 workspace; workspace-wide conventions (multi-repo layout, no `[workspace.dependencies]`,
 shared `../target/`) live in **`../cce-compositor/WORKSPACE.md`** — read that too.
 
-Two source files, all logic in `src/main.rs` (~5.8k lines):
+Two source files, all logic in `src/main.rs` (~5.9k lines):
 
 - `src/main.rs` — CLI parsing, daemon/client/standalone entry points, the Wayland
   surface and event loop, `FuzzelWidget` (the list UI: keyboard selection chip,
