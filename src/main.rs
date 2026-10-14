@@ -87,6 +87,7 @@ fn tessellate(
                     (c.height * scale) as u32,
                 )
             }),
+            clip_rrect: di.clip_rrect.map(|c| c.map(|v| v * scale)),
         })
         .collect();
     let batches = dl_batches
