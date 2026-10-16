@@ -67,12 +67,20 @@ cce-cloud --daemon                       # run the daemon (normally started by t
   **one popup at a time, serially**. A new client connection **preempts** the currently
   open popup (global single-popup semantics); a client hangup closes the popup
   (`StdinState.client_gone`).
-- No `--daemon`: `run_client()` connects to that socket, sends one JSON line
+- No `--daemon`: `run_client()` reads stdin to EOF (when the mode takes it), THEN
+  connects to that socket, sends one JSON line
   `{"args": [...], "initial_stdin": "..."}`, streams any further stdin lines over the
   socket, and blocks until the daemon writes the selection back — which it prints to
-  stdout. So callers get dmenu semantics whether or not the daemon is running.
-- If the socket connect fails, it falls back to `run_standalone()`: the same UI
-  in-process, selection printed directly to stdout.
+  stdout. So callers get dmenu semantics whether or not the daemon is running. The
+  order matters: the daemon gives a request 3 s and preempts the open popup on
+  connect, and until 2026-10-16 a slow producer connected first, missed the
+  deadline, and fell back with its stdin drained. A reply beginning `CLIENT_ERROR`
+  (a NUL) is an error: the client prints it to stderr and exits 1, as standalone does.
+- If the connect fails, it falls back to `run_standalone()`: the same UI
+  in-process, selection printed directly to stdout. The stdin the client already
+  read is handed over (`take_preread_stdin`), read ahead of what stdin has left.
+  Only standalone reads the process's own stdin (`State::new`'s `stdin_sender` is
+  `None` in the daemon, whose stdin is not the client's).
 
 **The daemon's life is one compositor's.** It holds one Wayland connection for good,
 so it has to notice that connection dying: the wait for the next request dispatches the
@@ -354,7 +362,12 @@ with it. All this side does on close is ask and then wait:
 on the compositor's control socket, answered with a duration in ms), stores
 the deadline in `fade_until`, and keeps the surface mapped until the loop
 sees it pass. Nothing is redrawn in between — the pixels stay put while the
-scene node fades under them.
+scene node fades under them. **Nor does any input land** (`AppState::closing`,
+checked by the key, pointer and modifier handlers and by
+`trigger_select_and_close`): the surface keeps the keyboard for the fade, and
+until 2026-10-16 a double click or a second Enter inside it committed again —
+two launches, two dmenu lines. A row click commits through
+`trigger_select_and_close`, the same path as Enter.
 
 This replaced a hand-rolled fade that multiplied every vertex and image alpha
 by a factor and then dropped the SDF-plate batches outright. A plate batch

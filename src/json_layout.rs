@@ -75,6 +75,18 @@ pub fn button_font_size() -> f32 {
 
 /// Whether a page's buttons reserve the left glyph column: any one of them
 /// has a left glyph.
+/// A spinbox's fraction digits at most. The value is formatted at this
+/// precision every paint; a layout asking for billions hung the daemon.
+const MAX_DECIMALS: u32 = 9;
+
+/// A spinbox's `min..=max` from the layout, low end first. cce-ui's
+/// `Spinbox` clamps with `Ord::clamp`, which panics on an inverted range — a
+/// layout with `"min": 10, "max": 0` took the daemon down on its first step.
+fn spinbox_range(min: Option<i32>, max: Option<i32>) -> (i32, i32) {
+    let (a, b) = (min.unwrap_or(0), max.unwrap_or(100));
+    (a.min(b), a.max(b))
+}
+
 pub fn page_has_lead(widgets: &[JsonWidgetConfig], page_idx: usize) -> bool {
     widgets
         .iter()
@@ -236,13 +248,13 @@ impl JsonLayoutWidget {
                             JsonControl::Label(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
                         }
                         "spinbox" => {
-                            let min_val = w_conf.min.unwrap_or(0);
-                            let max_val = w_conf.max.unwrap_or(100);
+                            let (min_val, max_val) = spinbox_range(w_conf.min, w_conf.max);
                             let step_val = w_conf.step.unwrap_or(1);
-                            let mut sb = Spinbox::new(w_conf.value.unwrap_or(0), min_val, max_val, step_val)
+                            let value = w_conf.value.unwrap_or(0).clamp(min_val, max_val);
+                            let mut sb = Spinbox::new(value, min_val, max_val, step_val)
                                 .with_label(&text);
                             if let Some(dec) = w_conf.decimals {
-                                sb = sb.with_decimals(dec);
+                                sb = sb.with_decimals(dec.min(MAX_DECIMALS));
                             }
                             JsonControl::Spinbox(sb)
                         }
@@ -318,13 +330,13 @@ impl JsonLayoutWidget {
                         JsonControl::Label(Label::new(&text).with_font_size(13.0).with_color([0xcc, 0xcc, 0xd4]))
                     }
                     "spinbox" => {
-                        let min_val = w_conf.min.unwrap_or(0);
-                        let max_val = w_conf.max.unwrap_or(100);
+                        let (min_val, max_val) = spinbox_range(w_conf.min, w_conf.max);
                         let step_val = w_conf.step.unwrap_or(1);
-                        let mut sb = Spinbox::new(w_conf.value.unwrap_or(0), min_val, max_val, step_val)
+                        let value = w_conf.value.unwrap_or(0).clamp(min_val, max_val);
+                        let mut sb = Spinbox::new(value, min_val, max_val, step_val)
                             .with_label(&text);
                         if let Some(dec) = w_conf.decimals {
-                            sb = sb.with_decimals(dec);
+                            sb = sb.with_decimals(dec.min(MAX_DECIMALS));
                         }
                         JsonControl::Spinbox(sb)
                     }
@@ -369,13 +381,17 @@ impl JsonLayoutWidget {
             }
         }
 
+        // One slot per page the layout has. These were a fixed 16 until
+        // 2026-10-16: widgets on a 17th page were silently dropped, and a
+        // `target_page` of 16 or more panicked the daemon at the next resize.
+        let pages = widgets.iter().map(|w| w.page_idx + 1).max().unwrap_or(1);
         cce_ui::widget::Adapted::new(Self {
             base: Widget::new(),
             widgets,
             dragging_slider_idx: None,
-            page_scroll_y: vec![0.0; 16],
-            page_scroll: vec![ScrollMotion::new(); 16],
-            page_total_heights: vec![0.0; 16],
+            page_scroll_y: vec![0.0; pages],
+            page_scroll: vec![ScrollMotion::new(); pages],
+            page_total_heights: vec![0.0; pages],
             active_page: 0,
         })
     }
@@ -388,7 +404,7 @@ impl JsonLayoutWidget {
         let pad_x = cce_ui::layout::root_plate_inset();
         let usable_w = bw - 2.0 * pad_x;
 
-        let mut page_current_y = [pad_x; 16]; // support up to 16 pages
+        let mut page_current_y = vec![pad_x; self.page_total_heights.len()];
         let spacing = cce_ui::layout::root_plate_gap();
 
         for i in 0..self.widgets.len() {
@@ -631,7 +647,9 @@ impl JsonLayoutWidget {
             }
         }
 
-        if let Some(target) = page_switch {
+        // A target naming no page is ignored: a page with no rows on it has
+        // no back row either, and Escape is the only way off it.
+        if let Some(target) = page_switch.filter(|&t| t < self.page_total_heights.len()) {
             self.active_page = target;
             self.layout_children();
             changed = true;
@@ -975,6 +993,73 @@ mod tests {
     use super::*;
     use cce_ui::widget::scroll_motion::{force_scroll_settings, ScrollSettings};
     use cce_ui::widget::MouseScrollDelta;
+
+    fn click(ui: &mut UiContext, id: cce_ui::widget::WidgetId, x: f32, y: f32) {
+        for state in [cce_ui::widget::ElementState::Pressed, cce_ui::widget::ElementState::Released] {
+            let ev = Event::MouseButton {
+                button: cce_ui::widget::MouseButton::Left,
+                state,
+                x,
+                y,
+                local_x: x,
+                local_y: y,
+            };
+            ui.propagate_event(&ev, id);
+        }
+    }
+
+    #[test]
+    fn a_target_page_that_names_no_page_is_ignored() {
+        // One past the last page, and one past the old fixed 16 slots, which
+        // panicked the daemon at the resize after the turn.
+        for target in [1, 99] {
+            let json = format!(r#"{{ "widgets": [ {{ "type": "button", "text": "x", "target_page": {target} }} ] }}"#);
+            let cfg: JsonLayoutConfig = serde_json::from_str(&json).expect("config");
+            let mut ui = UiContext::new();
+            let mut jl = JsonLayoutWidget::new(&cfg);
+            jl.set_rect(0.0, 0.0, 300.0, 200.0);
+            let h = ui.insert(jl);
+            let w = &ui[h].inner().widgets[0];
+            let (x, y) = (w.x + w.w / 2.0, w.y + w.h / 2.0);
+            click(&mut ui, h.id(), x, y);
+            assert_eq!(ui[h].inner().active_page, 0, "target_page {target}");
+        }
+
+        // The control: the same click on a page that exists turns to it.
+        let json = r#"{ "pages": [
+            { "title": "a", "widgets": [ { "type": "button", "text": "x", "target_page": 1 } ] },
+            { "title": "b", "widgets": [ { "type": "label", "text": "y" } ] } ] }"#;
+        let cfg: JsonLayoutConfig = serde_json::from_str(json).expect("config");
+        let mut ui = UiContext::new();
+        let mut jl = JsonLayoutWidget::new(&cfg);
+        jl.set_rect(0.0, 0.0, 300.0, 200.0);
+        let h = ui.insert(jl);
+        let w = &ui[h].inner().widgets[0];
+        let (x, y) = (w.x + w.w / 2.0, w.y + w.h / 2.0);
+        click(&mut ui, h.id(), x, y);
+        assert_eq!(ui[h].inner().active_page, 1);
+    }
+
+    #[test]
+    fn every_page_of_a_long_layout_gets_a_slot() {
+        let pages: Vec<String> = (0..20)
+            .map(|i| format!(r#"{{ "title": "p{i}", "widgets": [ {{ "type": "label", "text": "l{i}" }} ] }}"#))
+            .collect();
+        let json = format!(r#"{{ "pages": [ {} ] }}"#, pages.join(","));
+        let cfg: JsonLayoutConfig = serde_json::from_str(&json).expect("config");
+        let mut jl = JsonLayoutWidget::new(&cfg);
+        jl.set_rect(0.0, 0.0, 300.0, 200.0);
+        let l = jl.inner();
+        assert_eq!(l.page_total_heights.len(), 20);
+        assert!(l.page_total_heights.iter().all(|&h| h > 0.0), "page 17 on is laid out too");
+    }
+
+    #[test]
+    fn an_inverted_spinbox_range_is_put_right() {
+        assert_eq!(spinbox_range(Some(10), Some(0)), (0, 10));
+        assert_eq!(spinbox_range(None, None), (0, 100));
+        assert_eq!(spinbox_range(Some(-5), Some(5)), (-5, 5));
+    }
 
     /// One page of sliders, taller than the layout, so the page scrolls.
     fn slider_page() -> JsonLayoutConfig {

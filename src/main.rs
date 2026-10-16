@@ -4,7 +4,7 @@ use cce_ui::widget::ScrollRegion;
 use cce_ui::widget::{LineEdit, LineLook, LineMarks};
 
 use std::sync::{Arc, Mutex};
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self, IsTerminal};
 
 use cce_ui::widget::{WidgetHost, TextLabel};
 use crate::json_layout::{JsonLayoutWidget, JsonLayoutConfig};
@@ -558,8 +558,14 @@ fn save_history(history: &std::collections::HashMap<String, AppLaunchHistory>) {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
+        // Written aside and renamed over: a write cut short (a crash, a full
+        // disk) left a truncated file, which `load_history` reads as no
+        // history at all — and the next launch then saved that, wiping it.
         if let Ok(serialized) = serde_json::to_string_pretty(history) {
-            let _ = std::fs::write(path, serialized);
+            let tmp = path.with_extension("json.tmp");
+            if std::fs::write(&tmp, serialized).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 }
@@ -1875,7 +1881,7 @@ fn json_widget_desired_width(widget_type: &str, text: &str) -> f32 {
         // checkbox's toggle-height box and the 10px before its label, the
         // spinbox's field, the slider's track), not spacing.
         "checkbox" => cce_ui::widget::display::measure_text(text, 13.0) + margins + cce_ui::layout::toggle_height() + 10.0,
-        "spinbox" | "color" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 88.0,
+        "spinbox" | "color" | "rgb" | "rgba" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 88.0,
         "slider" => cce_ui::widget::display::measure_text(text, 13.0) + margins + 128.0,
         _ => 150.0,
     }
@@ -1905,7 +1911,10 @@ impl State {
         cce_wm: Option<&cce_ui::protocol::cce_window_management_v1::zcce_window_manager_v1::ZcceWindowManagerV1>,
         use_xdg: bool,
         prompt: String,
-        stdin_sender: calloop::channel::Sender<()>,
+        // Some: read THIS process's stdin (standalone). None: the daemon,
+        // whose stdin is not the client's — its socket handler fills
+        // `stdin_state` instead.
+        stdin_sender: Option<calloop::channel::Sender<()>>,
         mode: LauncherMode,
         x_pos: Option<i32>,
         y_pos: Option<i32>,
@@ -2105,12 +2114,15 @@ impl State {
         }));
 
         let mut apps = Vec::new();
-        if mode == LauncherMode::Dmenu {
+        if let (LauncherMode::Dmenu, Some(stdin_sender)) = (mode, stdin_sender) {
             let stdin_state_clone = stdin_state.clone();
             std::thread::spawn(move || {
-                let stdin = io::stdin();
-                for line in stdin.lock().lines() {
-                let Ok(line) = line else { continue };
+                let preread = take_preread_stdin().unwrap_or_default();
+                let preread = preread.lines().map(|l| Ok(l.to_string()));
+                // A read error ends the feed: one that persists (EIO on a hung
+                // up tty) used to spin this thread forever on `continue`.
+                let lines = preread.chain(io::stdin().lines()).map_while(Result::ok);
+                for line in lines {
                     if let Ok(mut lock_state) = stdin_state_clone.lock() {
                         if line == "__cce_switcher_next__" {
                             lock_state.cycle_next += 1;
@@ -2399,7 +2411,7 @@ impl State {
                     }
                 }
                 
-                let target_height = jl.page_total_heights[active_page].min(self.max_height as f32);
+                let target_height = jl.page_total_heights.get(active_page).copied().unwrap_or(0.0).min(self.max_height as f32);
                 let target_width = max_widget_w.clamp(120.0, self.max_width as f32);
                 
                 self.resize_window(target_width.round() as u32, target_height.round() as u32);
@@ -2737,7 +2749,19 @@ impl AppState {
         }
     }
 
+    /// Nothing the user does reaches a popup that is already closing. The
+    /// surface stays mapped, with the keyboard, for the compositor's fade
+    /// (`fade_until`), and until 2026-10-16 a second Enter or a double
+    /// click inside it committed again: the app launched twice, the
+    /// frecency counted twice, a dmenu caller read two lines.
+    fn closing(&self) -> bool {
+        self.fade_until.is_some() || self.exit
+    }
+
     fn trigger_select_and_close(&mut self) {
+        if self.closing() {
+            return;
+        }
         let mut should_close = false;
         if let Some(st) = &mut self.state {
             if !st.ui_context[st.fuzzel].filtered_items.is_empty() {
@@ -2924,8 +2948,19 @@ impl PointerHandler for AppState {
         events: &[smithay_client_toolkit::seat::pointer::PointerEvent],
     ) {
         use smithay_client_toolkit::seat::pointer::PointerEventKind;
+        if self.closing() {
+            return;
+        }
         let mut should_close = false;
+        // A row click commits through `trigger_select_and_close`, the one
+        // commit path Enter takes too — it carried its own copy until
+        // 2026-10-16, which never learned `place_next_at`.
+        let mut commit_row = false;
         for event in events {
+            if commit_row {
+                // The row as clicked: nothing later in this frame moves it.
+                break;
+            }
             if let Some(ref active_surface) = self.surface {
                 if active_surface != &event.surface {
                     continue;
@@ -3069,27 +3104,7 @@ impl PointerHandler for AppState {
                                     // rests on (the popup mapped under it) selects first.
                                     let commit = !st.switcher_mode || st.ui_context[st.fuzzel].selected == prev_selected;
                                     if commit {
-                                        if let Some(item) = st.ui_context[st.fuzzel].filtered_items.get(st.ui_context[st.fuzzel].selected) {
-                                            let answer = st.chooser.as_ref().map_or_else(|| item.clone(), |c| c.answer(item));
-                                            println!("{}", answer);
-                                            self.selected_item = Some(answer);
-                                            if !run_system_item(&st.ui_context[st.fuzzel], item) {
-                                                match st.mode {
-                                                    LauncherMode::Apps => {
-                                                        if let Some(app) = st.apps.iter().find(|app| &app.name == item) {
-                                                            record_app_launch(&app.name);
-                                                            spawn_app(app);
-                                                        }
-                                                    }
-                                                    LauncherMode::Path => {
-                                                        spawn_command(item);
-                                                    }
-                                                    LauncherMode::Dmenu => {}
-                                                    LauncherMode::Json => {}
-                                                }
-                                            }
-                                            should_close = true;
-                                        }
+                                        commit_row = true;
                                     }
                                     st.upload_vertices();
                                     self.redraw = true;
@@ -3246,6 +3261,9 @@ impl PointerHandler for AppState {
                 }
             }
         }
+        if commit_row {
+            self.trigger_select_and_close();
+        }
         if should_close {
             self.trigger_close();
         }
@@ -3324,7 +3342,7 @@ impl KeyboardHandler for AppState {
         self.switch_held = modifiers.logo || modifiers.alt;
         log::debug!("update_modifiers: logo={}, alt={}, prev_held={}", modifiers.logo, modifiers.alt, prev_held);
 
-        if self.switcher_mode && prev_held && !self.switch_held {
+        if self.switcher_mode && prev_held && !self.switch_held && !self.closing() {
             log::info!("Switcher modifier (Super/Alt) released, selecting currently highlighted item");
             self.trigger_select_and_close();
         }
@@ -3503,7 +3521,7 @@ impl AppState {
 
     fn handle_key(&mut self, event: smithay_client_toolkit::seat::keyboard::KeyEvent, state: cce_ui::widget::ElementState) {
         use cce_ui::widget::{Key, NamedKey};
-        if state != cce_ui::widget::ElementState::Pressed {
+        if state != cce_ui::widget::ElementState::Pressed || self.closing() {
             return;
         }
 
@@ -3543,7 +3561,7 @@ impl AppState {
                 // Shift or Alt.
                 let logical_key = match event.keysym {
                     xkeysym::Keysym::Escape => Key::Named(NamedKey::Escape),
-                    xkeysym::Keysym::Return => Key::Named(NamedKey::Enter),
+                    xkeysym::Keysym::Return | xkeysym::Keysym::KP_Enter => Key::Named(NamedKey::Enter),
                     xkeysym::Keysym::BackSpace => Key::Named(NamedKey::Backspace),
                     xkeysym::Keysym::Down => Key::Named(NamedKey::ArrowDown),
                     xkeysym::Keysym::Up => Key::Named(NamedKey::ArrowUp),
@@ -3660,6 +3678,12 @@ impl AppState {
                         let edited = q.text != before.0;
                         let moved = (q.cursor, q.selection) != (before.1, before.2);
                         if edited {
+                            // A new query's best match is its first row.
+                            // `filter` only clamps the highlight, which left it
+                            // wherever Down had put it — and in the switcher on
+                            // row 1 (the previous window), so typing a name and
+                            // releasing Alt switched to the SECOND match.
+                            st.ui_context[st.fuzzel].selected = 0;
                             st.ui_context[st.fuzzel].filter();
                             st.update_desired_size();
                         }
@@ -3742,6 +3766,7 @@ fn run_standalone() {
                     "apps" | "app" => mode = LauncherMode::Apps,
                     "path" => mode = LauncherMode::Path,
                     "dmenu" => mode = LauncherMode::Dmenu,
+                    "json" => mode = LauncherMode::Json,
                     _ => eprintln!("Unknown mode: {}", m),
                 }
                 i += 2;
@@ -3779,7 +3804,7 @@ fn run_standalone() {
     let mut json_layout_config: Option<JsonLayoutConfig> = None;
     if mode == LauncherMode::Json {
         use std::io::Read;
-        let mut json_str = String::new();
+        let mut json_str = take_preread_stdin().unwrap_or_default();
         let mut stdin = std::io::stdin();
         match stdin.read_to_string(&mut json_str) {
             Ok(_) => {
@@ -3862,7 +3887,7 @@ fn run_standalone() {
         cce_wm.as_ref(),
         use_xdg,
         prompt,
-        stdin_sender,
+        Some(stdin_sender),
         mode,
         x_pos,
         y_pos,
@@ -3997,8 +4022,6 @@ fn run_standalone() {
 
 fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{Read, Write};
-    let mut stream = std::os::unix::net::UnixStream::connect(socket_path)?;
-
     let mut needs_stdin = false;
     let mut mode_specified = false;
     let mut i = 1;
@@ -4047,27 +4070,43 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
         needs_stdin = !std::io::stdin().is_terminal();
     }
 
+    // All of stdin BEFORE connecting. The daemon gives a connection 3 s to
+    // send its request, and preempts the open popup the moment it connects:
+    // a slow producer (`nmcli … | cce-cloud --dmenu`) used to connect first,
+    // miss that deadline, and fall back to standalone with its stdin already
+    // drained — an empty list. Bytes that are not UTF-8 are replaced rather
+    // than failing the read, which emptied the list over one bad line.
     let mut stdin_str = String::new();
     if needs_stdin {
-        std::io::stdin().read_to_string(&mut stdin_str)?;
+        let mut bytes = Vec::new();
+        std::io::stdin().read_to_end(&mut bytes)?;
+        stdin_str = String::from_utf8_lossy(&bytes).into_owned();
     }
-
 
     let payload = serde_json::json!({
         "args": args,
-        "initial_stdin": stdin_str,
+        "initial_stdin": &stdin_str,
     });
+    let mut payload_str = payload.to_string();
+    payload_str.push('\n');
 
-    let payload_str = payload.to_string();
-    stream.write_all(payload_str.as_bytes())?;
-    stream.write_all(b"\n")?;
+    // From here a failure falls back to standalone, which must see the
+    // stdin this already consumed.
+    let mut stream = match std::os::unix::net::UnixStream::connect(socket_path)
+        .and_then(|mut s| s.write_all(payload_str.as_bytes()).map(|_| s))
+    {
+        Ok(s) => s,
+        Err(e) => {
+            set_preread_stdin(stdin_str);
+            return Err(e.into());
+        }
+    };
 
     let mut stream_clone = stream.try_clone()?;
     std::thread::spawn(move || {
         use std::io::BufRead;
         let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-        let Ok(line) = line else { continue };
+        for line in stdin.lock().lines().map_while(Result::ok) {
             let _ = stream_clone.write_all(line.as_bytes());
             let _ = stream_clone.write_all(b"\n");
         }
@@ -4075,8 +4114,33 @@ fn run_client(socket_path: &str, args: &[String]) -> Result<(), Box<dyn std::err
 
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
+    // An error is the caller's to see on stderr with a failing status, as
+    // standalone reports it — not a "selection" on stdout, which a caller
+    // parsing the reply as JSON choked on.
+    if let Some(err) = response.strip_prefix(CLIENT_ERROR) {
+        eprint!("{}", err);
+        std::process::exit(1);
+    }
     print!("{}", response);
     Ok(())
+}
+
+/// Leads a daemon reply that is an error rather than a selection. A NUL, which
+/// no selection (a line of text) can begin with.
+const CLIENT_ERROR: &str = "\0error: ";
+
+/// Stdin the client had already read when it found no daemon to send it to:
+/// standalone reads this first, then whatever stdin has left.
+static PREREAD_STDIN: Mutex<Option<String>> = Mutex::new(None);
+
+fn set_preread_stdin(text: String) {
+    if let Ok(mut slot) = PREREAD_STDIN.lock() {
+        *slot = Some(text);
+    }
+}
+
+fn take_preread_stdin() -> Option<String> {
+    PREREAD_STDIN.lock().ok()?.take()
 }
 
 /// The compositor this daemon serves has gone: exit, as a Wayland client whose
@@ -4349,6 +4413,7 @@ fn run_daemon(socket_path: &str) {
                         "apps" | "app" => mode = LauncherMode::Apps,
                         "path" => mode = LauncherMode::Path,
                         "dmenu" => mode = LauncherMode::Dmenu,
+                        "json" => mode = LauncherMode::Json,
                         _ => eprintln!("Unknown mode: {}", m),
                     }
                     i += 2;
@@ -4390,7 +4455,8 @@ fn run_daemon(socket_path: &str) {
                     json_layout_config = Some(cfg);
                 }
                 Err(e) => {
-                    let _ = stream.write_all(format!("Failed to parse JSON layout: {}\n", e).as_bytes());
+                    log::error!("Failed to parse JSON layout: {}", e);
+                    let _ = stream.write_all(format!("{}Failed to parse JSON layout: {}\n", CLIENT_ERROR, e).as_bytes());
                     continue;
                 }
             }
@@ -4477,7 +4543,11 @@ fn run_daemon(socket_path: &str) {
                             lock_daemon.cycle_next = 0;
                             lock_state.cycle_prev += lock_daemon.cycle_prev;
                             lock_daemon.cycle_prev = 0;
-                            lock_state.select_and_close = lock_daemon.select_and_close;
+                            // Moved, not copied, like the counters: left set, it
+                            // re-armed on every later line and committed the
+                            // first row to arrive after a select that found
+                            // the list empty.
+                            lock_state.select_and_close |= std::mem::take(&mut lock_daemon.select_and_close);
                             lock_state.new_data = true;
                             lock_daemon.new_data = false;
                         }
@@ -4512,7 +4582,7 @@ fn run_daemon(socket_path: &str) {
             cce_wm.as_ref(),
             use_xdg,
             prompt,
-            stdin_sender.clone(),
+            None,
             mode,
             x_pos,
             y_pos,
@@ -4743,15 +4813,18 @@ fn list_key_event(
     use xkeysym::Keysym as K;
     let named = match keysym {
         K::Escape => Some(NamedKey::Escape),
-        K::Return => Some(NamedKey::Enter),
+        // The keypad's keys (NumLock off) name the same keys; `key_repeats`
+        // always listed them, but until 2026-10-16 none was mapped here, so
+        // keypad Enter typed nothing and committed nothing.
+        K::Return | K::KP_Enter => Some(NamedKey::Enter),
         K::BackSpace => Some(NamedKey::Backspace),
-        K::Delete => Some(NamedKey::Delete),
-        K::Down => Some(NamedKey::ArrowDown),
-        K::Up => Some(NamedKey::ArrowUp),
-        K::Left => Some(NamedKey::ArrowLeft),
-        K::Right => Some(NamedKey::ArrowRight),
-        K::Home => Some(NamedKey::Home),
-        K::End => Some(NamedKey::End),
+        K::Delete | K::KP_Delete => Some(NamedKey::Delete),
+        K::Down | K::KP_Down => Some(NamedKey::ArrowDown),
+        K::Up | K::KP_Up => Some(NamedKey::ArrowUp),
+        K::Left | K::KP_Left => Some(NamedKey::ArrowLeft),
+        K::Right | K::KP_Right => Some(NamedKey::ArrowRight),
+        K::Home | K::KP_Home => Some(NamedKey::Home),
+        K::End | K::KP_End => Some(NamedKey::End),
         K::Tab => Some(NamedKey::Tab),
         K::space => Some(NamedKey::Space),
         _ => None,
