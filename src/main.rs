@@ -3227,7 +3227,11 @@ impl PointerHandler for AppState {
                                 st.upload_vertices();
                                 self.redraw = true;
                             }
-                        } else if st.ui_context[st.fuzzel].scroll_box.wheel(&delta, st.cursor_x, st.cursor_y) {
+                        } else if st
+                            .ui_context
+                            .lend_h(st.fuzzel, |f, ui| f.scroll_box.wheel_in(&delta, st.cursor_x, st.cursor_y, ui))
+                            .unwrap_or(false)
+                        {
                             st.ui_context[st.fuzzel].update_scroll();
                             st.upload_vertices();
                             self.redraw = true;

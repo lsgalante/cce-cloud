@@ -7,7 +7,7 @@
 use cce_ui::widget::scroll_motion::{scroll_settings, Bounds, ScrollMotion, LINE_PX};
 use cce_ui::widget::{
     WidgetHost, Widget, Checkbox, Button, Label, Spinbox, ColorSelector, TextLabel, MouseButton, ElementState, Slider, Event, UiContext,
-    Key, NamedKey, Justification,
+    Key, NamedKey, Justification, WidgetId,
 };
 use serde::Deserialize;
 
@@ -521,7 +521,13 @@ impl JsonLayoutWidget {
     /// verbatim). Every press reaches it (`Input::gates_presses` is off), matching the
     /// ungated legacy direct-dispatch path — the trailing focus-clear on a missed press
     /// depends on that.
-    fn route_event(&mut self, event: &Event, ctx: &mut UiContext) -> bool {
+    ///
+    /// A wheel goes to the page's scroll or to the parts on it, not both: whichever a gesture
+    /// first moves keeps it (`scroll_initiate_widget_id`, cleared at the gesture break), so a
+    /// page scrolled under the pointer never hands the rest of the gesture to a slider its
+    /// scroll carries there. (The toolkit rules which widget owns a gesture, this layout
+    /// included; among its own parts the latch is the layout's to keep.)
+    fn route_event(&mut self, event: &Event, id: WidgetId, ctx: &mut UiContext) -> bool {
         // MouseEnter targets THIS container (the adapter's base-hover bookkeeping
         // synthesizes it when a move goes unconsumed). Broadcasting it to every
         // child marks them all hovered — Button's on_event trusts the router
@@ -563,8 +569,11 @@ impl JsonLayoutWidget {
 
         let active_page = self.active_page;
         let mut page_switch = None;
+        let is_wheel = matches!(event, Event::MouseWheel { .. });
+        let page_owns_wheel = is_wheel && ctx.scroll_initiate_widget_id == Some(id);
+        let mut part_took_wheel = false;
         for (idx, w) in self.widgets.iter_mut().enumerate() {
-            if w.page_idx != active_page {
+            if w.page_idx != active_page || page_owns_wheel {
                 continue;
             }
 
@@ -608,6 +617,7 @@ impl JsonLayoutWidget {
             } else {
                 if w.widget.as_dyn_mut().handle_event(event, ctx) {
                     changed = true;
+                    part_took_wheel |= is_wheel;
                 }
                 if w.widget_type == "button" {
                     // take_click is an WidgetHost method; the Phase 5 Button is Adapted, so call it
@@ -629,7 +639,7 @@ impl JsonLayoutWidget {
 
         if let Event::MouseWheel { delta, x, y, .. } = event {
             let (bx, by, bw, bh) = self.rect();
-            if *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh && active_page < self.page_total_heights.len() {
+            if !part_took_wheel && *x >= bx && *x <= bx + bw && *y >= by && *y <= by + bh && active_page < self.page_total_heights.len() {
                 let total_height = self.page_total_heights[active_page];
                 let visible_h = bh;
                 let max_scroll_y = (total_height - visible_h).max(0.0);
@@ -642,6 +652,7 @@ impl JsonLayoutWidget {
                     motion.reconcile(0.0, self.page_scroll_y[active_page]);
                     if motion.apply(delta, (LINE_PX, LINE_PX), Bounds::max(0.0), Bounds::max(max_scroll_y)) {
                         changed = true;
+                        ctx.scroll_initiate_widget_id = Some(id);
                     }
                     if self.sync_page_scroll(active_page) {
                         self.layout_children();
@@ -852,7 +863,7 @@ impl cce_ui::widget::Input for JsonLayoutWidget {
 
     fn on_event(&mut self, event: &Event, ectx: &mut cce_ui::widget::EventCtx) -> bool {
         let Some(ctx) = ectx.ui.as_deref_mut() else { return false };
-        self.route_event(event, ctx)
+        self.route_event(event, ectx.id, ctx)
     }
 
     fn tick_ctx(&mut self, dt: f32, ectx: &mut cce_ui::widget::EventCtx) -> bool {
@@ -956,5 +967,82 @@ impl JsonLayoutWidget {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cce_ui::widget::scroll_motion::{force_scroll_settings, ScrollSettings};
+    use cce_ui::widget::MouseScrollDelta;
+
+    /// One page of sliders, taller than the layout, so the page scrolls.
+    fn slider_page() -> JsonLayoutConfig {
+        let sliders: Vec<String> = (0..30)
+            .map(|i| format!(r#"{{ "type": "slider", "text": "s{i}", "value_f32": 0.5 }}"#))
+            .collect();
+        let json = format!(r#"{{ "pages": [ {{ "title": "p", "widgets": [ {} ] }} ] }}"#, sliders.join(","));
+        serde_json::from_str(&json).expect("config")
+    }
+
+    fn slider_values(l: &JsonLayoutWidget) -> Vec<f32> {
+        l.widgets
+            .iter()
+            .filter_map(|w| match &w.widget {
+                JsonControl::Slider(s) => Some(s.inner().value()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_page_scrolled_under_the_pointer_keeps_the_gesture_from_its_sliders() {
+        force_scroll_settings(Some(ScrollSettings { smooth: false, kinetic: false, ..Default::default() }));
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(8));
+        let mut ui = UiContext::new();
+        let mut jl = JsonLayoutWidget::new(&slider_page());
+        jl.set_rect(0.0, 0.0, 300.0, 200.0);
+        let h = ui.insert(jl);
+        let wheel = |x: f32, y: f32| Event::MouseWheel {
+            delta: MouseScrollDelta::LineDelta(0.0, -1.0),
+            x,
+            y,
+            local_x: x,
+            local_y: y,
+        };
+        let centre = |ui: &UiContext, i: usize| {
+            let w = &ui[h].inner().widgets[i];
+            (w.x + w.w / 2.0, w.y + w.h / 2.0)
+        };
+        let id = h.id();
+
+        // A wheel between two sliders scrolls the page, which takes the gesture.
+        let (x, _) = centre(&ui, 0);
+        let gap = {
+            let (a, b) = (&ui[h].inner().widgets[0], &ui[h].inner().widgets[1]);
+            (a.y + a.h + b.y) / 2.0
+        };
+        assert!(ui.propagate_event(&wheel(x, gap), id));
+        let scrolled = ui[h].inner().page_scroll_y[0];
+        assert!(scrolled > 0.0, "the page scrolls");
+
+        // The rest of the gesture is the page's, over a slider or not.
+        for _ in 0..3 {
+            pause();
+            let (x, y) = centre(&ui, 2);
+            let before = ui[h].inner().page_scroll_y[0];
+            assert!(ui.propagate_event(&wheel(x, y), id));
+            assert!(ui[h].inner().page_scroll_y[0] > before, "the page keeps scrolling");
+        }
+        assert!(slider_values(ui[h].inner()).iter().all(|v| *v == 0.5), "no slider took the page's gesture");
+
+        // A new gesture begun on a slider is the slider's: the page stays put under it.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let (x, y) = centre(&ui, 4);
+        let page = ui[h].inner().page_scroll_y[0];
+        assert!(ui.propagate_event(&wheel(x, y), id));
+        assert_eq!(ui[h].inner().page_scroll_y[0], page, "the page stays put");
+        assert_ne!(slider_values(ui[h].inner())[4], 0.5, "the slider takes it");
+        force_scroll_settings(None);
     }
 }
