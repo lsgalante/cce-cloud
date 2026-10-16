@@ -798,7 +798,9 @@ struct SystemCommand {
 /// The window verbs act on the window BEHIND this popup, not on the popup:
 /// the compositor's `focused_window` skips overlay UI and names `cce-cloud`
 /// explicitly among it, falling back to the most recent real window. That is
-/// what makes "Close Window" from a launcher mean anything at all.
+/// what makes "Close Window" from a launcher mean anything at all. A verb
+/// that resolves its target any other way reaches the launcher instead:
+/// `restart-app` read the seat's focus — the popup — until 2026-10-16.
 ///
 /// Hardcoded rather than config-driven: these are the DE's own verbs, and a
 /// row naming a command `ccectl` does not have is a row that silently does
@@ -806,6 +808,10 @@ struct SystemCommand {
 const SYSTEM_COMMANDS: &[SystemCommand] = &[
     SystemCommand { name: "Close Window", program: "ccectl", args: &["close"] },
     SystemCommand { name: "Minimize Window", program: "ccectl", args: &["minimize"] },
+    // Closes every window of the app's process, waits for it to exit and
+    // starts it again with the same argv/env/cwd (a unit through systemd).
+    // No `--force`: an app that stays up (a save prompt) is left alone.
+    SystemCommand { name: "Restart Focused App", program: "ccectl", args: &["restart-app"] },
     SystemCommand { name: "Toggle Fullscreen", program: "ccectl", args: &["fullscreen"] },
     SystemCommand { name: "Center Window", program: "ccectl", args: &["center-window"] },
     SystemCommand { name: "Overlay Window Left", program: "ccectl", args: &["overlay-left"] },
