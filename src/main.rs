@@ -414,7 +414,7 @@ fn scan_apps_in(dirs: Vec<std::path::PathBuf>) -> Vec<AppInfo> {
     // user copy, which ID shadowing cannot catch) collapses to the
     // higher-precedence entry — but only when the command matches too.
     // Matching on the name alone silently dropped a different app that
-    // happened to share it: cce-claude vanished behind the Claude desktop
+    // happened to share it: cce-code-agent vanished behind the Claude desktop
     // app's "Claude", the survivor decided by read_dir order. The sorts are
     // stable, so scan (precedence) order decides which copy stays.
     apps.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name).then_with(|| a.exec.cmp(&b.exec)));
@@ -429,7 +429,7 @@ fn exec_program(exec: &str) -> &str {
 }
 
 /// Different apps that share a `Name=` each keep a row, told apart by their
-/// program — `Claude (cce-claude)`, `Claude (claude-desktop)` — or by
+/// program — `Claude (cce-code-agent)`, `Claude (claude-desktop)` — or by
 /// desktop-file ID where the program is shared too (`flatpak run …`, one
 /// binary with different flags). The name is every row's key (label, icon,
 /// the launch lookup, history), so it has to be unique. `apps` arrives
@@ -5507,8 +5507,8 @@ mod tests {
         // Same app under two IDs; the commands match once field codes go.
         entry(&sys, "org.example.Editor", "Editor", "editor %F", "editor-sys");
         entry(&user, "editor-copy", "Editor", "editor", "editor-user");
-        // Different apps, one name (the 2026-10-13 cce-claude case).
-        entry(&sys, "cce-claude", "Claude", "cce-claude", "");
+        // Different apps, one name (the 2026-10-13 cce-code-agent case).
+        entry(&sys, "cce-code-agent", "Claude", "cce-code-agent", "");
         entry(&user, "com.anthropic.Claude", "Claude", "/usr/bin/claude-desktop %u", "");
         // One program run two ways: only the ID tells them apart.
         entry(&sys, "firefox", "Firefox", "firefox %u", "");
@@ -5520,7 +5520,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "Claude (cce-claude)",
+                "Claude (cce-code-agent)",
                 "Claude (claude-desktop)",
                 "Editor",
                 "Firefox (firefox)",
@@ -5530,8 +5530,8 @@ mod tests {
         // The collapsed pair keeps the higher-precedence (user) entry.
         let editor = apps.iter().find(|a| a.name == "Editor").unwrap();
         assert_eq!(editor.icon.as_deref(), Some("editor-user"));
-        let claude = apps.iter().find(|a| a.name == "Claude (cce-claude)").unwrap();
-        assert_eq!(claude.exec, "cce-claude");
+        let claude = apps.iter().find(|a| a.name == "Claude (cce-code-agent)").unwrap();
+        assert_eq!(claude.exec, "cce-code-agent");
 
         let _ = std::fs::remove_dir_all(&base);
     }

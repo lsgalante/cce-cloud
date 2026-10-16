@@ -131,7 +131,7 @@ bound with plain `get_keyboard`, and a held Backspace deleted one character.
   installed twice), and different apps sharing a name both stay, labelled
   `Name (program)` or, when the program is shared too, `Name (id)`
   (`disambiguate_names`) — the name is the row's key everywhere. Until
-  2026-10-13 a name match alone collapsed them, and cce-claude vanished behind
+  2026-10-13 a name match alone collapsed them, and cce-code-agent vanished behind
   the Claude desktop app's "Claude". Selecting spawns the app's
   `Exec` (spawn output logged to `$XDG_RUNTIME_DIR/cce/spawn.log`, via
   `cce_ui::config::cce_runtime_dir()` — it was `/tmp/cce-spawn.log` before
