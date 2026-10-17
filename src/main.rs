@@ -4775,8 +4775,8 @@ fn nav_keys() -> &'static (Option<(bool, char)>, Option<(bool, char)>) {
     static KEYS: std::sync::OnceLock<(Option<(bool, char)>, Option<(bool, char)>)> = std::sync::OnceLock::new();
     KEYS.get_or_init(|| {
         (
-            chord_ctrl_char(&cce_ui::input::app_chord("select_next", "ctrl+n")),
-            chord_ctrl_char(&cce_ui::input::app_chord("select_prev", "ctrl+p")),
+            chord_ctrl_char(&cce_ui::input::app_shortcut("select_next", "ctrl+n", "Next row")),
+            chord_ctrl_char(&cce_ui::input::app_shortcut("select_prev", "ctrl+p", "Previous row")),
         )
     })
 }
